@@ -12,9 +12,10 @@ overrides:
   '@midnight-ntwrk/platform-js': 2.2.4
   '@midnight-ntwrk/onchain-runtime-v3': 3.0.0
 
-# Native / binary post-install steps this workspace allows.
-onlyBuiltDependencies:
-  - classic-level
-  - esbuild
-  - '@swc/core'
-  - msgpackr-extract
+# Native / binary post-install steps this workspace allows (pnpm 11 `allowBuilds`;
+# without this, CI installs fail with ERR_PNPM_IGNORED_BUILDS).
+allowBuilds:
+  classic-level: true
+  esbuild: true
+  '@swc/core': true
+  msgpackr-extract: true
