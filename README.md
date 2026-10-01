@@ -171,6 +171,18 @@ building or balancing) and relays all finalized transactions through the funder'
 The benchmark prints the per-block histogram with each transaction's status and fee, the proving and
 balancing times, and verifies the ledger afterwards.
 
+Measured on the local devnet (node 1.0.2, indexer 4.3.5, proof server 8.1.0, ~6 s blocks):
+
+| Scenario                                   | Result                                                                                      |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------- |
+| 10 users → 10 other users, independently   | all 10 transfers in the same block (one block after submit), 10/10 succeeded: 20 balance updates in one block |
+| 4 users → the same recipient               | 1 succeeded; 3 included but `FailFallible` (fee paid, no state change): one credit per recipient per block |
+| 10 simultaneous `register` calls           | 2 accepted per block; the rest rejected at pre-dispatch with `OutOfGas` and must be rebuilt |
+
+Per transfer on this machine: build ~1 s, prove ~6 s, balance <1 s. The ceiling for independent pairs
+was not reached at 10; raise `--senders` to look for it (each extra sender adds about four setup
+transactions, roughly 100 s).
+
 ## How the pieces fit
 
 1. **Wallet connection** (`WalletProvider.tsx`): find 1AM under `window.midnight`, `connect()` with the
