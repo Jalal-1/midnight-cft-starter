@@ -1,261 +1,255 @@
-# Midnight Starter
+# Midnight CFT Starter
+
+Deploy OpenZeppelin's **ConfidentialFungibleToken** (CFT) on [Midnight](https://midnight.network) and use
+it from a web app. Balances and transfer amounts stay encrypted on chain; who holds an account and who
+pays whom is public.
 
 **Live demo:** https://jalal-1.github.io/midnight-cft-starter/ · **Source:** https://github.com/Jalal-1/midnight-cft-starter
 
-A forkable starter template for building dApps on the [Midnight](https://midnight.network) network.
-It ships a deployable **ConfidentialFungibleToken** (OpenZeppelin Contracts for Compact), a
-browser frontend that connects to the [1AM](https://1am.xyz) wallet and deploys / uses the token,
-and a headless CLI for seed-based deployments and end-to-end checks.
-
-## What's in the box
-
-| Phase | What                                                                                  | Status |
-| ----- | ------------------------------------------------------------------------------------- | ------ |
-| 1     | Frontend: landing page + Connect Wallet via DApp Connector v4 (1AM, any v4 wallet)    | ✅     |
-| 2     | Contract: OpenZeppelin CFT wrapper in Compact, compiled with the Compact 0.31.1 toolchain | ✅  |
-| 3     | Deploy: from the browser through the wallet, or headless from a seed; local devnet via Docker | ✅ |
-
 ```
-apps/web/                 Vite + React 19 + TypeScript + Tailwind v4
-  src/midnight/
-    networks.ts           network ids, labels, indexer / proof-server endpoints
-    wallet.ts             1AM discovery (window.midnight), error mapping, formatting helpers
-    WalletProvider.tsx    React context: detect → connect (follows the wallet's network) → connected; auto-reconnect
-    providers.ts          Midnight.js providers on top of the connected wallet
-    CftProvider.tsx       React context: tokens per network, deploy / join / register / issue / send / sweep / burn
-    glossary.ts           field explanations taken from the OpenZeppelin module's documentation
-  src/components/         Header, ConnectScreen, TokensPanel, TokenDetails, AccountCard, ActionsPanel, Glossary
-packages/contract/        The contract and its TypeScript SDK (@midnight-starter/contract)
-  src/cft.compact         wrapper around OpenZeppelin ConfidentialFungibleToken + PublicSupply + Ownable
-  src/witnesses.ts        private state (SK / EK / plaintext cache) and the OZ witnesses
-  src/crypto.ts           key derivation, memo decryption, balance verification, bounded discrete log
-  src/ledger.ts           read token / account out of the public ledger, resolve encrypted balances
-  src/client.ts           CftClient: deploy / join and every token operation on Midnight.js providers
-  src/managed/cft/        compiler output (gitignored): TS module, prover / verifier keys, ZKIR
-packages/deploy/          Headless CLI (@midnight-starter/deploy): deploy.ts, e2e.ts, seed wallet
-docker/                   standalone devnet (node + indexer + proof server) and proof-server-only compose files
-.compact-version          0.31.1 (the compiler version the networks support today)
+packages/contract   the CFT bundle: Compact contract + compiled keys + TypeScript SDK
+apps/web            React app: connect 1AM, deploy or join a token, register, issue, send, sweep, burn
+packages/deploy     headless CLI: seed-based deploy, end-to-end check, concurrency benchmark
+docker/             local devnet (node, indexer, proof server) and a standalone proof server
 ```
 
-## Prerequisites
+## The CFT bundle
 
-- Node.js 22+ (see `.nvmrc`) and [pnpm](https://pnpm.io) 11+ (`corepack enable`)
-- The Compact developer tools, pinned to **0.31.1**:
-  ```bash
-  curl --proto '=https' --tlsv1.2 -LsSf https://github.com/midnightntwrk/compact/releases/latest/download/compact-installer.sh | sh
-  compact update 0.31.1
-  compact compile --version   # 0.31.1
-  ```
-- Docker Compose v2 for the local devnet and/or a local proof server
-- A Midnight wallet extension implementing DApp Connector v4. This template is built around
-  [1AM](https://1am.xyz) ([Chrome Web Store](https://chromewebstore.google.com/detail/1am/bphnkdkcnfhompoegfpgnkidcjfbojjp)); Lace also shows up in the picker.
+`packages/contract` is what you take into your own solution. It has three parts.
+
+**The contract** (`src/cft.compact`) composes three audited OpenZeppelin modules from
+`@openzeppelin/compact-contracts` 0.3.0-rc.1 and exports a deliberately small surface:
+
+| Circuit | Who | Effect | What becomes public |
+| --- | --- | --- | --- |
+| `register()` | anyone | publishes the caller's encryption key; required before receiving | the Account ID |
+| `mint(account, value)` | issuer only | credits a registered account, raises `totalSupply` | amount (via supply delta), recipient |
+| `sweep()` | holder | moves pending credits into the spendable balance | nothing new |
+| `transfer(to, value)` | holder | debits the sender, credits the recipient, leaves them an encrypted memo | (sender, recipient) pair |
+| `burn(value)` | holder | debits the caller, lowers `totalSupply` | amount (via supply delta) |
+
+The issuer is the Account ID passed at deployment (Ownable owner). Allowances, pausing and freezing
+are one `export circuit` away in the same file; see [Extending](#extending).
+
+**The compiled output** (`src/managed/cft/`, produced by `pnpm compile`) is the generated TypeScript
+module, the prover and verifier keys (about 48 MB) and the circuit IR. The web app serves it; the CLI
+reads it from disk.
+
+**The SDK** (`src/client.ts` and friends) gives you deploy / join, every token operation, the five
+witnesses the module requires, and the cryptography to read encrypted balances:
+
+```ts
+import { CftClient, CftPrivateState, deployCft, joinCft, makeCompiledContract, parseAmount } from '@midnight-starter/contract';
+
+const compiled = makeCompiledContract(zkAssetsPath);            // directory (Node) or URL path (browser)
+const identity = CftPrivateState.generate();                    // the account: keep its two secrets
+
+const deployed = await deployCft(providers, compiled, identity, { name: 'My Token', symbol: 'MTK', decimals: 2 });
+const issuer = new CftClient(providers, deployed, identity, compiled);
+await issuer.register();
+await issuer.mint(holderId, parseAmount('100.00', 2));
+await issuer.transferBatch(payees.map((to) => ({ to, value: parseAmount('1.00', 2) })));   // many payees, one block
+
+const holder = await CftClient.attach(providers, await joinCft(providers, compiled, address, holderIdentity), holderIdentity, compiled);
+const { spendable, pending, memos } = await holder.balances();
+await holder.sweep();
+await holder.transfer(otherId, parseAmount('2.50', 2));
+```
+
+`providers` are Midnight.js `MidnightProviders`. Two reference wirings are included:
+[providers.ts](apps/web/src/midnight/providers.ts) for the browser (fees and proofs through the 1AM
+wallet) and [providers.ts](packages/deploy/src/providers.ts) for Node (seed wallet, HTTP proof server).
+
+### How accounts work
+
+A CFT account is a keypair the **application** generates, not the wallet's keys. The wallet only pays
+fees. `Account ID = hash(SK)` is public and is what others need to pay you. A second secret derives
+the **viewing key**, which decrypts your balances and memos but cannot spend; hand it to an auditor
+for read-only access. Incoming credits land in a **pending** pool and are moved into the
+**spendable** balance by `sweep()`, which stops third parties from disturbing your spendable
+ciphertext with dust. Every credit carries an encrypted memo with the exact amount, so a wallet never
+needs to brute-force its own balance. Losing the two secrets loses the account, exactly like a seed.
+
+## Lifecycle, step by step
+
+Every participant goes through the same sequence. Each step is one transaction, paid for and proved by
+the participant's wallet (see the next section), and confirmed in the next block (~6 s).
+
+| # | Step | Who | What happens | Prerequisite |
+| --- | --- | --- | --- | --- |
+| 1 | **Deploy** | the issuer | The constructor stores name, symbol and decimals and records the deployer's Account ID as the only account allowed to mint. | a wallet with DUST |
+| 2 | **Register** | every account, issuer included | Publishes the account's encryption public key and sets its balance to an encryption of zero. The module refuses to credit an unregistered account. | the account's secrets exist (the app creates them on first connect) |
+| 3 | **Issue** (`mint`) | the issuer | Credits a registered account's *pending* pool and raises the public `totalSupply` by the amount. | recipient has registered and shared its Account ID |
+| 4 | **Sweep** | the recipient | Moves everything in *pending* into *spendable* in one proof. Nothing can be spent before this. | pending > 0 |
+| 5 | **Send** (`transfer`) | any holder | Debits the sender's spendable balance, credits the recipient's pending pool and leaves them an encrypted memo with the exact amount. | registered sender with enough spendable; registered recipient |
+| 6 | **Burn** | any holder | Debits the caller's spendable balance and lowers `totalSupply`. | enough spendable |
+
+Reading a balance never needs a transaction. The SDK decrypts the memo list with the viewing key to
+get *pending* exactly, and knows *spendable* from what it debited itself (verified against the
+on-chain ciphertext) or, failing that, by a bounded search. If a browser has lost that record, the
+holder can type the balance they know and it is verified before use (`setKnownSpendable`).
+
+A treasury that must pay many accounts in one block uses `transferBatch` (step 5, N times, in one
+transaction); see [Treasury](#treasury-paying-many-wallets-in-one-block).
+
+## What the wallet does, and what it does not
+
+The 1AM wallet (any DApp Connector v4 wallet) has exactly three jobs in this solution:
+
+1. **Pays.** Every transaction needs a DUST fee. The app hands the wallet an unbalanced transaction;
+   the wallet adds the DUST input, signs and submits it (`balanceUnsealedTransaction`,
+   `submitTransaction`). The wallet's NIGHT and DUST are the only funds it ever touches.
+2. **Proves.** The zero-knowledge proofs for each circuit call are generated inside 1AM
+   (`getProvingProvider`), using the prover keys the app serves under `/contract/cft`. The app
+   therefore needs no proof server when used with 1AM; the headless CLI uses one because it has no
+   wallet.
+3. **Anchors identity and network.** The app keeps one CFT account per wallet address, and it uses
+   whichever network the wallet is on. Connecting the same wallet again returns you to the same
+   account and the same tokens.
+
+The wallet does **not** hold the token. CFT balances are entries inside the contract's state,
+encrypted to the account's own key; they do not appear in the wallet's balance view, and the wallet
+never sees the account secrets or the viewing key. Those live in the browser: the two secrets in
+`localStorage`, the private state (plaintext cache, randomness seed) in an encrypted IndexedDB store,
+both scoped to the wallet address. Clearing the browser loses the account even though the wallet seed
+is intact. For anything beyond a starter, back the secrets up or derive them deterministically from a
+wallet signature (`signData`) so the wallet seed alone can recover them. The same split is what lets
+the headless CLI act as issuer or holder with no browser at all.
 
 ## Quick start
 
+Prerequisites: Node 22+, pnpm 11+ (`corepack enable`), the Compact toolchain pinned to 0.31.1, and
+the [1AM](https://1am.xyz) wallet extension. Docker is needed only for the local devnet or a local
+proof server.
+
 ```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/midnightntwrk/compact/releases/latest/download/compact-installer.sh | sh
+compact update 0.31.1
+
 pnpm install
-pnpm compile          # compact compile → packages/contract/src/managed/cft (≈1 min, 48 MB of keys)
-pnpm build:contract   # TypeScript SDK → packages/contract/dist
-pnpm dev              # http://localhost:5173
+pnpm compile            # compiles the contract and generates proving keys (~1 min)
+pnpm build:contract     # builds the SDK
+pnpm dev                # http://localhost:5173
 ```
 
-In the browser: **Connect 1AM** (the app follows whichever network the wallet is on), then **+ Deploy**
-a token (you become the issuer) or **Join** one by contract address. Select it in **Your tokens**, then
-**Register** your confidential account, **Issue** to a registered account (issuer), **Sweep**, **Send
-confidentially**, **Burn**. Every field has a "?" with the explanation from the contract's own
-documentation, and the **Glossary** button collects them all.
+Connect 1AM, click **+ Deploy**, then **Register** your account. Share Account IDs to **Issue** or
+**Send**. Every field in the app has a "?" with the explanation from the module's own documentation.
 
-The dashboard is a fixed, app-like view (panels scroll, the page does not). The connection, the
-network, your tokens per network and your confidential identity per wallet all survive a reload.
+### Toolchain pins
 
-`pnpm compile:fast` skips proving-key generation (type-checking the contract only); the app needs the
-full `pnpm compile` to prove transactions.
+The whole stack must agree on one ledger version. Preview, Preprod and Mainnet run the ledger-8 line:
 
-## Networks
+| Component | Version |
+| --- | --- |
+| Compact compiler (`.compact-version`) | 0.31.1 |
+| `@midnight-ntwrk/compact-runtime` / `compact-js` | 0.16.0 / 2.5.1 |
+| `@midnight-ntwrk/ledger-v8` | 8.1.0 |
+| `@midnight-ntwrk/midnight-js-*` | 4.1.1 |
+| `@openzeppelin/compact-contracts` | 0.3.0-rc.1 |
+| Devnet images: node / indexer / proof server | 1.0.2 / 4.3.5 / 8.1.0 |
 
-There is no network selector in the UI: the network is chosen in 1AM. On connect the app asks for the
-last network it saw (or `VITE_DEFAULT_NETWORK_ID`, default `preview`), reads back the network the wallet
-is actually on, reconnects on that one and shows it in the top bar. If you switch networks inside the
-wallet, the app follows within a few seconds. Tokens and accounts are remembered per network.
+Overrides live in `pnpm-workspace.yaml`. Newer compilers (0.34+) and OpenZeppelin 0.4.0-alpha target a
+ledger the public networks do not run yet. Compatibility matrix:
+https://docs.midnight.network/relnotes/support-matrix
 
-| Network    | Connector `networkId` | Indexer                                   | Notes                                           |
-| ---------- | --------------------- | ----------------------------------------- | ----------------------------------------------- |
-| Preview    | `preview`             | indexer.preview.midnight.network          | Public dev network.                             |
-| Preprod    | `preprod`             | indexer.preprod.midnight.network          | Public staging network.                         |
-| Undeployed | `undeployed`          | 127.0.0.1:8088 (`pnpm devnet:up`)         | Local devnet. Wallet must be configured for it. |
-| Mainnet    | `mainnet`             | indexer.mainnet.midnight.network          | Real funds.                                     |
+## Deploying
 
-Endpoints live in `apps/web/src/midnight/networks.ts` and `packages/deploy/src/config.ts`.
+**From the browser.** Connect 1AM and deploy; the wallet pays the fee and proves in-wallet, so no
+proof server is needed. The app follows whichever network the wallet is on and remembers your
+tokens per network.
 
-## The contract
-
-`packages/contract/src/cft.compact` composes three OpenZeppelin modules (installed from npm as
-`@openzeppelin/compact-contracts@0.3.0-rc.1`, the last line targeting the ledger-8 / Compact 0.31
-stack the public networks run):
-
-- **ConfidentialFungibleToken** — balances are ElGamal ciphertexts on Jubjub; every credit delivers the
-  amount to the recipient through an ECDH one-time-pad memo; accounts are `accountId = hash(SK)`.
-- **ConfidentialFungibleTokenPublicSupply** — a public `totalSupply` (mint / burn amounts are visible as deltas).
-- **Ownable** — the deployer's account is the issuer and the only one that can `mint`.
-
-Exported impure circuits: `register`, `sweep`, `transfer(to, value)`, `burn(value)`, `mint(account, value)`.
-Each exported circuit adds ~2.6 KB of verifier key to the deploy transaction against a ~50 KB per-tx
-write budget on public networks, so the surface is deliberately lean. Allowances (`approve`,
-`transferFrom`), `Pausable`, freeze lists etc. are one `export circuit` away in the same file.
-
-What is public: the (sender, recipient) pair of every transfer, every account id, the supply.
-What is hidden: every balance and every transfer amount.
-
-### CFT accounts vs wallet accounts
-
-A CFT account is a keypair the **dApp** generates (`CftPrivateState.generate()`), independent of the
-wallet's own keys. The wallet only pays fees. The browser keeps one identity per wallet address in
-`localStorage` (SK / EK) and the full private state (plaintext cache, randomness seed) in an
-encrypted IndexedDB store via Midnight.js's level private-state provider. Losing both means losing
-the ability to spend that account's balance, exactly like losing a wallet seed. For anything beyond a
-starter, back this up or derive it from the wallet (e.g. `signData`).
-
-## Headless deploy and end-to-end check
+**Headless.** A funded seed deploys from the CLI (faucet: https://faucet.preview.midnight.network/;
+local proof server: `pnpm proof-server:up`):
 
 ```bash
-pnpm devnet:up                 # node 1.0.2 + indexer 4.3.5 + proof server 8.1.0, genesis wallet funded
-pnpm e2e                       # deploy, register ×3, mint, sweep, confidential transfer, burn
-pnpm deploy:contract           # just deploy; prints the contract address
-pnpm devnet:down
+SEED=<64 hex> pnpm deploy:contract -- --network preview --name "My Token" --symbol MTK --decimals 2
+pnpm devnet:up && pnpm e2e        # local devnet: deploy, register, mint, sweep, transfer, burn
 ```
 
-Against a public network, fund a seed (faucet: https://faucet.preview.midnight.network/) and run a
-local proof server for the CLI (`pnpm proof-server:up`):
+The issuer identity is written to `packages/deploy/.state/<network>/issuer.json` (gitignored). Keep
+it secret: it is the only identity that can mint.
 
-```bash
-SEED=<64 hex chars> pnpm deploy:contract -- --network preview --name "Confidential Dollar" --symbol cUSD --decimals 2
-SEED=<64 hex chars> pnpm e2e -- --network preview
-```
+**Hosting the app.** It is a static site. `.github/workflows/deploy-pages.yml` installs the pinned
+toolchain, caches the compiled contract, and publishes `apps/web/dist` to GitHub Pages on every push
+to `main` (enable it once under Settings → Pages → Source: GitHub Actions). Any static host works;
+build with `VITE_BASE=/sub-path/` when not served from the root.
 
-The issuer identity is written to `packages/deploy/.state/<network>/issuer.json` (gitignored, keep it
-secret) and reused on the next deploy; addresses are appended to `deployments.txt` next to it.
+## Performance and concurrency
 
-## Benchmark: how many balance updates fit in one block?
-
-`pnpm bench` measures per-block concurrency on a real network (the local devnet by default). It deploys
-a fresh token, gives every sender its own funded fee wallet (like real users), builds and proves N
-transfers against the same chain state, submits them all in the same instant, then reads back from the
-indexer which block included each one and whether it succeeded.
+Measured on the local devnet (same component versions as Preview, ~6 s blocks). Per transfer: build
+~1 s, prove ~6 s on a workstation proof server (1AM proves in-wallet, timings vary), balance under
+1 s, inclusion in the next block. Reproduce with `pnpm bench`:
 
 ```bash
 pnpm devnet:up
 pnpm bench -- --mode disjoint --senders 10   # 10 users → 10 other users, independently
 pnpm bench -- --mode fanin    --senders 4    # 4 users → the same recipient
-pnpm bench -- --mode fanout   --senders 4    # 1 user → 4 recipients, 4 separate transactions at once
+pnpm bench -- --mode fanout   --senders 4    # 1 user → 4 recipients, 4 separate transactions
 pnpm bench -- --mode batch    --senders 10   # 1 treasury → 10 recipients in ONE transaction
 ```
 
-Three things bound the answer, and the benchmark separates them:
+| Scenario | Result |
+| --- | --- |
+| 10 users → 10 other users, independently | all 10 transfers in the same block, 10/10 succeeded: 20 balance updates in one block |
+| 4 users → the same recipient | 1 succeeded; 3 included but failed (fee paid, no state change): one credit per recipient per block |
+| 1 user → 4 recipients as separate transactions | at most one debit per sender per block; the wallet could pay for 2 of the 4 at all |
+| 1 treasury → 10 recipients in one transaction | succeeded entirely: all 10 credited in one block, one fee, ~53 s end to end |
+| 10 simultaneous `register` calls | 2 accepted per block; the rest rejected before inclusion and must be rebuilt |
 
-- **Fees (DUST).** Every transaction pays its fee in DUST, and a wallet holds its DUST as one coin per
-  registered NIGHT UTXO. A coin is spent and re-created per transaction, so a wallet with one coin pays
-  for one transaction per block. The benchmark therefore funds one wallet per sending user, and gives
-  the fan-out sender N NIGHT UTXOs so it holds N DUST coins. A transaction the node rejects still leaves
-  its DUST coin pending in the wallet; call `revertTransaction` before retrying, or the retry fails with
-  "could not balance dust".
-- **Execution-cost budget.** A transaction declares the cost of replaying its transcript, measured
-  against the state it was built on; the DUST fee covers that budget. When another transaction in the
-  same block has grown the same ledger map first, replaying costs more than declared and the node
-  rejects it at pre-dispatch. The node's internal name for this is `Transcript(Execution(OutOfGas))`.
-  Ten simultaneous `register` calls (ten inserts into the same maps) got two through per block for
-  this reason.
-- **Contract state.** From the module's own "Concurrency" notes: a transfer reads and writes the
-  sender's balance and the recipient's pending pool, memo list and credit counter, so transfers between
-  **disjoint** pairs touch different ledger cells, while two credits to the **same** recipient (or two
-  debits from the **same** sender) in one block conflict and only the first succeeds, unless they are
-  chained inside one transaction (see the treasury batch below). Mint and burn also touch the public
-  `totalSupply`.
+Three things bound these numbers:
 
-Operational note for the local stack: the indexer image (4.3.5) crash-loops when a dozen wallets sync
-at once, so the benchmark keeps at most two wallets live (the funder and the sender currently
-building or balancing) and relays all finalized transactions through the funder's connection.
+- **Fees.** Every transaction pays in DUST, and a wallet holds its DUST as one coin per registered
+  NIGHT UTXO. A coin is spent and re-created per transaction, so one coin pays for one transaction per
+  block. Independent users have independent wallets; a single wallet gets more by splitting its NIGHT
+  into several registered UTXOs. A rejected transaction leaves its coin pending until the wallet
+  reverts it.
+- **Declared execution cost.** A transaction states the cost of replaying its transcript against the
+  state it was built on. If another transaction in the same block has grown the same ledger map first,
+  the replay exceeds the declaration and the node rejects it before inclusion (its log says
+  `Transcript(Execution(OutOfGas))`). This is what limits simultaneous registrations.
+- **Contract state.** A transfer reads and writes the sender's balance and the recipient's pending
+  pool, memo list and credit counter. Disjoint pairs touch different cells and share a block freely.
+  Two credits to one recipient, or two debits from one sender, conflict and only the first succeeds.
 
-The benchmark prints the per-block histogram with each transaction's status and fee, the proving and
-balancing times, and verifies the ledger afterwards.
+### Treasury: paying many wallets in one block
 
-Measured on the local devnet (node 1.0.2, indexer 4.3.5, proof server 8.1.0, ~6 s blocks):
+A sender cannot fan out with separate transactions: Midnight has no account nonces, so it cannot order
+them inside a block, and every transfer after the first is proved against a balance that has already
+changed. The pattern that works is **one transaction carrying all the transfers**, which is what
+`CftClient.transferBatch` does:
 
-| Scenario                                   | Result                                                                                      |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------- |
-| 10 users → 10 other users, independently   | all 10 transfers in the same block (one block after submit), 10/10 succeeded: 20 balance updates in one block |
-| 4 users → the same recipient               | 1 succeeded; 3 included but `FailFallible` (fee paid, no state change): one credit per recipient per block |
-| 1 user → 4 recipients, 4 separate transactions | wallet (4 registered NIGHT UTXOs) could pay for 2 of 4; of those, 1 succeeded and 1 `FailFallible`: one debit per sender per block |
-| 1 treasury → 10 recipients, one transaction | `SucceedEntirely`: 10 chained transfer calls as segments 1..10, all 10 recipients credited in one block, one DUST fee, ~53 s end to end |
-| 10 simultaneous `register` calls           | 2 accepted per block; the rest rejected at pre-dispatch (execution-cost budget exceeded, `OutOfGas`) and must be rebuilt |
+1. Build transfer 1 against the on-chain state, transfer 2 against the state transfer 1 leaves
+   behind, and so on (`createUnprovenCallTxFromInitialStates`).
+2. Place the calls in one transaction as segments 1..N (`Transaction.addIntent({ tag: 'specific', value: k })`).
+   The ledger executes a transaction's segments in ascending segment id, so the chain is deterministic.
+3. Prove, pay one fee, submit.
 
-So a sender cannot fan out with *separate* transactions: it has no way to order them inside a block
-(Midnight has no account nonces), and every one after the first sees a balance that has already
-changed. What a treasury does instead is put the whole fan-out into **one transaction**:
-`CftClient.transferBatch` builds each transfer against the state the previous one leaves behind and
-places the calls as segments 1..N; the ledger executes a transaction's segments in ascending segment
-id, so the chain is deterministic, and one DUST fee pays for all of it. (Midnight.js's own scoped
-transactions give each call a random segment id, which is why the first attempt at this succeeded for
-one call only.) Per transfer on this machine: build ~1 s, prove ~6 s, balance <1 s. The ceiling for independent pairs
-was not reached at 10; raise `--senders` to look for it (each extra sender adds about four setup
-transactions, roughly 100 s).
+Measured: ten transfers from one treasury to ten recipients, included in one block, all credited, one
+fee. Midnight.js's scoped transactions chain calls the same way but assign random segment ids, so
+dependent calls run in random order; explicit ids are required. Two witness details make this work
+and are already in the SDK: the balance witness verifies the wallet's expected value against a
+ciphertext it has not yet seen on chain, and the seed witness hands out a fresh seed on every call.
 
-## How the pieces fit
+## Extending
 
-1. **Wallet connection** (`WalletProvider.tsx`): find 1AM under `window.midnight`, `connect()` with the
-   last known network, follow the network the wallet reports, read addresses and the shielded public
-   keys Midnight.js needs. The connection is restored on reload until you disconnect.
-2. **Providers** (`providers.ts`): proofs are delegated to the wallet when it exposes
-   `getProvingProvider` (1AM proves in-wallet; no proof server needed), otherwise sent to an HTTP
-   proof server. Transactions are balanced, signed and submitted by the wallet via
-   `balanceUnsealedTransaction` / `submitTransaction`. ZK assets are served by the app at
-   `/contract/cft/{keys,zkir}` (copied from the compiled contract at build time).
-3. **Contract client** (`client.ts`): `deployCft` / `joinCft` wrap Midnight.js's `deployContract` /
-   `findDeployedContract`; `CftClient` rotates the randomness seed before every transaction and keeps
-   the plaintext cache the OZ witnesses require.
-
-## Hosting
-
-The web app is a static site: proving happens inside 1AM and chain state is read from the public
-indexer, so no server is needed. `.github/workflows/deploy-pages.yml` builds everything (installing the
-pinned Compact toolchain and caching the compiled contract) and publishes `apps/web/dist` to **GitHub
-Pages** on every push to `main`. Turn it on once under Settings → Pages → Source: *GitHub Actions*.
-The reference deployment is https://jalal-1.github.io/midnight-cft-starter/. After forking, the same
-workflow publishes your fork at `https://<you>.github.io/<repo>/` with no changes.
-
-Any other static host works the same way: run `pnpm compile && pnpm build` and upload `apps/web/dist`
-(about 60 MB, mostly proving keys; the largest file is 22 MB). When the site is served under a sub-path,
-build with `VITE_BASE=/that-path/`.
-
-## Scripts
-
-| Command               | What it does                                                     |
-| --------------------- | ---------------------------------------------------------------- |
-| `pnpm compile`        | Compile the contract with proving keys (needs `compact` 0.31.1)  |
-| `pnpm compile:fast`   | Compile without proving keys (type-check the Compact only)       |
-| `pnpm build:contract` | Build the TypeScript SDK and copy the compiled assets            |
-| `pnpm dev`            | Start the Vite dev server                                        |
-| `pnpm build`          | Build the SDK and the web app                                    |
-| `pnpm typecheck`      | Type-check every workspace                                       |
-| `pnpm devnet:up/down` | Start / stop the local devnet                                    |
-| `pnpm deploy:contract`, `pnpm e2e` | Headless deploy / end-to-end check (`-- --network <name>`)   |
-| `pnpm bench`          | Per-block concurrency benchmark (`-- --mode disjoint\|fanin\|fanout --senders N`) |
+- Export more of the OpenZeppelin surface in `cft.compact` (`approve` / `transferFrom`, `Pausable`,
+  a freeze list), then `pnpm compile && pnpm build:contract`; the SDK types follow the contract.
+- Each exported circuit adds about 2.6 KB of verifier key to the deploy transaction against a ~50 KB
+  per-transaction write budget on public networks. A deployed contract can also grow by upgrade
+  through its maintenance authority.
+- To use the bundle in another repository, copy `packages/contract`, keep the toolchain pins, and
+  wire `MidnightProviders` as in the two reference files above.
 
 ## Troubleshooting
 
-- **"No Midnight wallet detected"** — install the extension, then refresh the page.
-- **"1AM is on network X, which this app does not know"** — the wallet reports a network id this template
-  has no endpoints for; add it to `apps/web/src/midnight/networks.ts`.
-- **`checkRuntimeVersion` / version mismatch at load** — the compiler, `compact-runtime`, `ledger-v8` and
-  the network must agree. This template pins compiler 0.31.1 ↔ runtime 0.16.0 ↔ ledger 8.1.0 (see
-  `pnpm-workspace.yaml` overrides and https://docs.midnight.network/relnotes/support-matrix). Do not
-  `compact update` past 0.31.1 until the networks move.
-- **"Transaction would exhaust the block limits" on deploy** — too many exported circuits for the
-  network's per-transaction write budget; export fewer.
-- **Indexer exits on `pnpm devnet:up`** — it raced the node's first block; it restarts on failure, give it a few seconds.
-- **First proof is slow** — 1AM proves in-browser with WASM and fetches the prover key (up to 21 MB per
-  circuit) on first use. Show a loading state; the UI already does.
-- **Spendable balance "unknown"** — this browser has no record of the balance and it is above the
-  recovery bound; enter the balance you know in the account panel, it is verified against the ciphertext.
+- **1AM not detected**: install the extension and refresh; it injects on page load.
+- **Version mismatch at load (`checkRuntimeVersion`)**: compiler, runtime, ledger and network must
+  agree; see the pins above and do not `compact update` past 0.31.1 until the networks move.
+- **"Transaction would exhaust the block limits" on deploy**: too many exported circuits; export fewer.
+- **Spendable balance unknown**: the browser has no record of it; enter the balance you know in the
+  account panel and it is verified against the ciphertext before use.
+- **Devnet indexer exits on start**: it raced the node's first block and restarts on its own. It also
+  crash-loops when a dozen wallets sync at once, which is why the benchmark keeps two wallets live.
 
 ## License
 

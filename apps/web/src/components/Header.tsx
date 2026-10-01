@@ -1,3 +1,4 @@
+import { nativeToken } from '@midnight-ntwrk/ledger-v8';
 import { NETWORKS } from '../midnight/networks';
 import { useWallet } from '../midnight/useWallet';
 import { formatUnits, truncateAddress } from '../midnight/wallet';
@@ -7,8 +8,7 @@ import { CopyButton, Term, ghostButton } from './ui';
 export function Header({ onGlossary }: { onGlossary: () => void }) {
   const { state } = useWallet();
   const connected = state.status === 'connected' ? state : undefined;
-  // TODO(ledger): identify NIGHT via nativeToken() instead of the first unshielded entry.
-  const night = connected?.balances ? Object.values(connected.balances.unshielded)[0] : undefined;
+  const night = connected?.balances ? (connected.balances.unshielded[nativeToken().raw] ?? 0n) : undefined;
 
   return (
     <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-night-700 bg-night-900/80 px-4 backdrop-blur">

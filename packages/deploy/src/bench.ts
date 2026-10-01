@@ -1,38 +1,18 @@
 // Per-block concurrency benchmark for the CFT.
 //
-// Question: how many balance updates can land in ONE block? Method: deploy a
-// fresh token, give every sending user its own funded fee wallet, build, prove
-// and balance N transfers against the same chain state, submit them all in the
-// same instant, then read back from the indexer which block included each one
-// and whether it succeeded.
+// Deploys a fresh token, funds one fee wallet per sending user, builds and
+// proves N transfers against the same chain state, submits them in the same
+// instant, then reads back from the indexer which block included each one and
+// whether it succeeded. Results and the reasoning behind them: README,
+// "Performance and concurrency".
 //
-//   pnpm bench -- --mode disjoint --senders 10    N users → N other users, independently
-//   pnpm bench -- --mode fanin    --senders 4     N users → the SAME recipient
-//   pnpm bench -- --mode fanout   --senders 4     ONE user → N recipients, N separate transactions at once
-//   pnpm bench -- --mode batch    --senders 10    ONE user (treasury) → N recipients in ONE transaction
+//   pnpm bench -- --mode disjoint --senders 10   N users → N other users, independently
+//   pnpm bench -- --mode fanin    --senders 4    N users → the same recipient
+//   pnpm bench -- --mode fanout   --senders 4    one user → N recipients, N separate transactions
+//   pnpm bench -- --mode batch    --senders 10   one treasury → N recipients in ONE transaction
 //
-// Three things bound the answer, and the benchmark separates them:
-//   1. Fees (DUST). Every transaction pays its fee in DUST, and a wallet's DUST
-//      is held as one coin per registered NIGHT UTXO. A coin is spent and
-//      re-created per transaction, so a wallet with one coin pays for one
-//      transaction per block. Independent users have independent wallets; the
-//      fan-out sender is funded with N NIGHT UTXOs so it holds N DUST coins.
-//   2. Execution-cost budget. A transaction declares the cost of replaying its
-//      transcript, measured against the state it was built on (the DUST fee
-//      covers that budget). When another transaction in the same block has
-//      grown the same ledger map first, replaying costs more than declared and
-//      the node rejects it at pre-dispatch; the node's internal name for this
-//      is Transcript(Execution(OutOfGas)).
-//   3. Contract state. Two credits to the SAME recipient in one block conflict
-//      (see the "Concurrency" note in OpenZeppelin's ConfidentialFungibleToken
-//      module), and two debits from the SAME sender both pin the sender's
-//      balance ciphertext, so only the first can succeed. Transfers between
-//      DISJOINT pairs touch different cells and commute.
-//
-// Operational note: the local indexer (4.3.5) crash-loops when a dozen wallets
-// sync concurrently, so at most two wallets are live at any time: the funder
-// and the one sender currently building / balancing. Finalized transactions
-// are relayed through the funder's node connection.
+// At most two wallets are live at any time (the funder and the sender being
+// prepared): the local indexer crash-loops when a dozen wallets sync at once.
 import type { ContractAddress } from '@midnight-ntwrk/compact-runtime';
 import { createUnprovenCallTx } from '@midnight-ntwrk/midnight-js-contracts';
 import type { FinalizedTxData } from '@midnight-ntwrk/midnight-js-types';

@@ -2,7 +2,7 @@
   "name": "midnight-starter",
   "private": true,
   "version": "0.2.0",
-  "description": "Forkable starter template for building dApps on the Midnight network",
+  "description": "Deploy OpenZeppelin's ConfidentialFungibleToken on Midnight: contract + TypeScript SDK, 1AM wallet web app, headless deploy CLI and concurrency benchmark",
   "license": "Apache-2.0",
   "packageManager": "pnpm@11.21.0",
   "engines": {

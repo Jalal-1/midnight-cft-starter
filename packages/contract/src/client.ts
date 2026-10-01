@@ -131,8 +131,7 @@ export class CftClient {
     readonly contract: DeployedCft,
     /** The identity this client acts as; kept in sync with the private-state store. */
     readonly identity: CftPrivateState,
-    /** Needed for `transferBatch`, which assembles calls by hand. */
-    readonly compiledContract?: CftCompiledContract,
+    readonly compiledContract: CftCompiledContract,
   ) {}
 
   /**
@@ -144,7 +143,7 @@ export class CftClient {
     providers: CftProviders,
     contract: DeployedCft,
     suggested: CftPrivateState,
-    compiledContract?: CftCompiledContract,
+    compiledContract: CftCompiledContract,
   ): Promise<CftClient> {
     const stored = await providers.privateStateProvider.get(PRIVATE_STATE_ID);
     return new CftClient(providers, contract, stored ?? suggested, compiledContract);
@@ -280,7 +279,6 @@ export class CftClient {
    */
   async transferBatch(outputs: { to: string; value: bigint }[]): Promise<TxReceipt & { segments: number }> {
     if (outputs.length === 0) throw new Error('nothing to send');
-    if (!this.compiledContract) throw new Error('transferBatch needs the compiled contract (pass it to the CftClient constructor)');
     const total = outputs.reduce((a, o) => a + o.value, 0n);
     const b = await this.balances();
     if (!b.registered) throw new Error('register first');
