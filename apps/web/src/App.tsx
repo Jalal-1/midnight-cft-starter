@@ -1,36 +1,49 @@
-import { AccountPanel } from './components/AccountPanel';
-import { ConnectWalletButton } from './components/ConnectWalletButton';
-import { ContractPanel } from './components/ContractPanel';
-import { Hero } from './components/Hero';
-import { NetworkSelect } from './components/NetworkSelect';
-import { WalletCard } from './components/WalletCard';
+import { useState } from 'react';
+import { AccountCard } from './components/AccountCard';
+import { ActionsPanel } from './components/ActionsPanel';
+import { ConnectScreen } from './components/ConnectScreen';
+import { Glossary } from './components/Glossary';
+import { Header } from './components/Header';
+import { TokenDetails } from './components/TokenDetails';
+import { TokensPanel } from './components/TokensPanel';
 import { CftProvider } from './midnight/CftProvider';
+import { useWallet } from './midnight/useWallet';
 import { WalletProvider } from './midnight/WalletProvider';
+
+function Dashboard() {
+  return (
+    <main className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-y-auto p-4 lg:grid-cols-12 lg:overflow-hidden">
+      <div className="flex min-h-0 flex-col lg:col-span-3">
+        <TokensPanel />
+      </div>
+      <div className="flex min-h-0 flex-col gap-4 lg:col-span-5">
+        <TokenDetails />
+        <AccountCard />
+      </div>
+      <div className="flex min-h-0 flex-col lg:col-span-4">
+        <ActionsPanel />
+      </div>
+    </main>
+  );
+}
+
+function Shell() {
+  const { state } = useWallet();
+  const [glossaryOpen, setGlossaryOpen] = useState(false);
+  return (
+    <div className="flex h-dvh flex-col overflow-hidden">
+      <Header onGlossary={() => setGlossaryOpen(true)} />
+      {state.status === 'connected' ? <Dashboard /> : <ConnectScreen />}
+      {glossaryOpen && <Glossary onClose={() => setGlossaryOpen(false)} />}
+    </div>
+  );
+}
 
 export default function App() {
   return (
     <WalletProvider>
       <CftProvider>
-        <main className="relative flex min-h-dvh flex-col items-center gap-8 px-4 py-16">
-          <div
-            aria-hidden
-            className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-96 bg-[radial-gradient(ellipse_at_top,theme(colors.glow.400/20%),transparent_60%)]"
-          />
-          <Hero />
-
-          <section className="flex w-full max-w-md flex-col gap-6 rounded-2xl border border-night-700 bg-night-900/60 p-6 backdrop-blur">
-            <NetworkSelect />
-            <ConnectWalletButton />
-          </section>
-
-          <div className="flex w-full max-w-2xl flex-col gap-6">
-            <WalletCard />
-            <ContractPanel />
-            <AccountPanel />
-          </div>
-
-          <footer className="text-xs text-slate-600">Midnight Starter · Apache-2.0 · DApp Connector v4 · OpenZeppelin CFT</footer>
-        </main>
+        <Shell />
       </CftProvider>
     </WalletProvider>
   );

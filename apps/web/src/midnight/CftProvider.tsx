@@ -1,6 +1,7 @@
-// React context for one CFT contract per connected wallet + network:
-// deploy / join, token info, this wallet's confidential account, and the
-// token operations. Wraps the framework-agnostic `CftClient`.
+// React context for the CFT tokens this browser knows about on the selected
+// network, and for the one currently attached: deploy / join, token info, this
+// wallet's confidential account, and the token operations. Wraps the
+// framework-agnostic `CftClient`.
 import { createContext, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   CftClient,
@@ -12,24 +13,52 @@ import {
   type TokenParams,
   type TxReceipt,
 } from '@midnight-starter/contract';
-import { NETWORKS } from './networks';
+import { NETWORKS, type NetworkId } from './networks';
 import { compiledContract, makeProviders } from './providers';
 import { useWallet } from './useWallet';
 import { describeError } from './wallet';
 
+/** A token this browser deployed or joined, remembered per network. */
+export interface TokenRecord {
+  address: string;
+  name: string;
+  symbol: string;
+  decimals: number;
+  /** ISO timestamp of the deploy / first join from this browser. */
+  addedAt: string;
+  /** Account ID that deployed it, when deployed from this browser. */
+  deployedBy?: string;
+}
+
 export type CftStatus =
   | { kind: 'no-wallet' }
   | { kind: 'detached'; error?: string }
-  | { kind: 'attaching'; what: 'deploy' | 'join' }
-  | { kind: 'attached'; client: CftClient; token: TokenInfo; balances?: Balances; isIssuer: boolean; busy?: string; error?: string };
+  | { kind: 'attaching'; what: 'deploy' | 'join'; address?: string }
+  | {
+      kind: 'attached';
+      client: CftClient;
+      token: TokenInfo;
+      balances?: Balances;
+      isIssuer: boolean;
+      busy?: string;
+      error?: string;
+    };
 
 export interface CftContextValue {
   status: CftStatus;
+  /** Tokens remembered for the connected network, newest first. */
+  tokens: TokenRecord[];
+  /** Address of the token being attached or attached. */
+  selectedAddress?: string;
   /** This browser's CFT identity for the connected wallet (SK / EK live in storage, never shown). */
   accountId?: string;
   deploy: (params: TokenParams) => Promise<void>;
   join: (contractAddress: string) => Promise<void>;
-  /** Forget the attached contract address for this network (identity is kept). */
+  /** Attach to a remembered token. */
+  select: (contractAddress: string) => Promise<void>;
+  /** Forget a remembered token (the on-chain token and your identity are untouched). */
+  forget: (contractAddress: string) => void;
+  /** Detach from the current token without forgetting it. */
   detach: () => void;
   refresh: () => Promise<void>;
   register: () => Promise<TxReceipt | undefined>;
@@ -45,7 +74,8 @@ export interface CftContextValue {
 export const CftContext = createContext<CftContextValue | null>(null);
 
 const identityKey = (walletAddress: string) => `midnight-starter:cft-identity:${walletAddress}`;
-const addressKey = (networkId: string, walletAddress: string) => `midnight-starter:cft-address:${networkId}:${walletAddress}`;
+const tokensKey = (networkId: NetworkId) => `midnight-starter:tokens:${networkId}`;
+const selectedKey = (networkId: NetworkId, walletAddress: string) => `midnight-starter:cft-selected:${networkId}:${walletAddress}`;
 
 const readJson = <T,>(key: string): T | undefined => {
   try {
@@ -78,6 +108,25 @@ const loadOrCreateIdentity = (walletAddress: string): CftPrivateState => {
   return fresh;
 };
 
+const loadTokens = (networkId: NetworkId): TokenRecord[] => readJson<TokenRecord[]>(tokensKey(networkId)) ?? [];
+
+/** Joining only reads from the indexer; if it does not answer, say so instead of spinning forever. */
+const JOIN_TIMEOUT_MS = 30_000;
+const withTimeout = <T,>(promise: Promise<T>, ms: number, message: string): Promise<T> =>
+  new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error(message)), ms);
+    promise.then(
+      (v) => {
+        window.clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        window.clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+
 export function CftProvider({ children }: { children: ReactNode }) {
   const wallet = useWallet();
   const connected = wallet.state.status === 'connected' ? wallet.state : undefined;
@@ -85,28 +134,69 @@ export function CftProvider({ children }: { children: ReactNode }) {
   const networkId = connected?.networkId;
 
   const [status, setStatus] = useState<CftStatus>({ kind: 'no-wallet' });
+  const [tokens, setTokens] = useState<TokenRecord[]>([]);
+  const [selectedAddress, setSelectedAddress] = useState<string>();
   const [lastReceipt, setLastReceipt] = useState<TxReceipt>();
   const sessionRef = useRef(0);
 
   const identity = useMemo(() => (walletAddress ? loadOrCreateIdentity(walletAddress) : undefined), [walletAddress]);
+  const accountId = identity ? CftPrivateState.accountIdHex(identity) : undefined;
+
+  // The token list follows the network the wallet is on.
+  useEffect(() => {
+    setTokens(networkId ? loadTokens(networkId) : []);
+  }, [networkId]);
+
+  const upsertToken = useCallback(
+    (record: TokenRecord) => {
+      if (!networkId) return;
+      setTokens((prev) => {
+        const next = [record, ...prev.filter((t) => t.address !== record.address)];
+        writeJson(tokensKey(networkId), next);
+        return next;
+      });
+    },
+    [networkId],
+  );
 
   const attach = useCallback(
-    async (what: 'deploy' | 'join', run: (providers: Awaited<ReturnType<typeof makeProviders>>, id: CftPrivateState) => Promise<CftClient>) => {
-      if (!connected || !identity || !walletAddress || !networkId) return;
+    async (
+      what: 'deploy' | 'join',
+      address: string | undefined,
+      run: (providers: Awaited<ReturnType<typeof makeProviders>>, id: CftPrivateState) => Promise<CftClient>,
+    ) => {
+      if (!connected || !identity || !walletAddress) return;
       const session = ++sessionRef.current;
-      setStatus({ kind: 'attaching', what });
+      setSelectedAddress(address);
+      setStatus({ kind: 'attaching', what, address });
       try {
         const providers = await makeProviders({
           api: connected.api,
           keys: connected.keys,
           walletAddress,
-          network: NETWORKS[networkId],
+          network: NETWORKS[connected.networkId],
         });
-        const client = await run(providers, identity);
+        const client =
+          what === 'join'
+            ? await withTimeout(
+                run(providers, identity),
+                JOIN_TIMEOUT_MS,
+                `The indexer for ${NETWORKS[connected.networkId].label} did not answer. Check the network and the contract address.`,
+              )
+            : await run(providers, identity);
         if (session !== sessionRef.current) return;
-        writeJson(addressKey(networkId, walletAddress), client.address);
         const [token, isIssuer] = await Promise.all([client.token(), client.isIssuer()]);
         if (session !== sessionRef.current) return;
+        setSelectedAddress(client.address);
+        writeJson(selectedKey(connected.networkId, walletAddress), client.address);
+        upsertToken({
+          address: client.address,
+          name: token.name,
+          symbol: token.symbol,
+          decimals: token.decimals,
+          addedAt: tokens.find((t) => t.address === client.address)?.addedAt ?? new Date().toISOString(),
+          deployedBy: what === 'deploy' ? client.accountId : tokens.find((t) => t.address === client.address)?.deployedBy,
+        });
         setStatus({ kind: 'attached', client, token, isIssuer });
         // Balances are best-effort and may need the bounded discrete log.
         try {
@@ -119,15 +209,17 @@ export function CftProvider({ children }: { children: ReactNode }) {
         }
       } catch (e) {
         if (session !== sessionRef.current) return;
+        setSelectedAddress(undefined);
+        if (walletAddress && connected) writeJson(selectedKey(connected.networkId, walletAddress), undefined);
         setStatus({ kind: 'detached', error: describeError(e) });
       }
     },
-    [connected, identity, walletAddress, networkId],
+    [connected, identity, walletAddress, tokens, upsertToken],
   );
 
   const join = useCallback(
     (contractAddress: string) =>
-      attach('join', async (providers, id) => {
+      attach('join', contractAddress.trim(), async (providers, id) => {
         const found = await joinCft(providers, compiledContract, contractAddress, id);
         return CftClient.attach(providers, found, id);
       }),
@@ -136,31 +228,53 @@ export function CftProvider({ children }: { children: ReactNode }) {
 
   const deploy = useCallback(
     (params: TokenParams) =>
-      attach('deploy', async (providers, id) => {
+      attach('deploy', undefined, async (providers, id) => {
         const deployed = await deployCft(providers, compiledContract, id, params);
         return new CftClient(providers, deployed, id);
       }),
     [attach],
   );
 
-  // Wallet connected / disconnected / switched network: reset, and auto-join the
-  // address remembered for this wallet + network.
+  // Keep the latest join() for the reconnect effect without re-running it on every render.
+  const joinRef = useRef(join);
+  useEffect(() => {
+    joinRef.current = join;
+  }, [join]);
+
+  // Wallet connected / disconnected / switched network: reset, and re-attach
+  // the token remembered for this wallet + network.
   useEffect(() => {
     sessionRef.current++;
-    if (!walletAddress || !networkId) {
+    setSelectedAddress(undefined);
+    if (!walletAddress || !connected) {
       setStatus({ kind: 'no-wallet' });
       return;
     }
-    const remembered = readJson<string>(addressKey(networkId, walletAddress));
-    if (remembered) void join(remembered);
+    const remembered = readJson<string>(selectedKey(connected.networkId, walletAddress));
+    if (remembered) void joinRef.current(remembered);
     else setStatus({ kind: 'detached' });
-  }, [walletAddress, networkId, join]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [walletAddress, connected?.networkId]);
 
   const detach = useCallback(() => {
     sessionRef.current++;
-    if (walletAddress && networkId) writeJson(addressKey(networkId, walletAddress), undefined);
-    setStatus({ kind: 'detached' });
-  }, [walletAddress, networkId]);
+    setSelectedAddress(undefined);
+    if (walletAddress && connected) writeJson(selectedKey(connected.networkId, walletAddress), undefined);
+    setStatus(connected ? { kind: 'detached' } : { kind: 'no-wallet' });
+  }, [walletAddress, connected]);
+
+  const forget = useCallback(
+    (contractAddress: string) => {
+      if (!networkId) return;
+      setTokens((prev) => {
+        const next = prev.filter((t) => t.address !== contractAddress);
+        writeJson(tokensKey(networkId), next);
+        return next;
+      });
+      if (selectedAddress === contractAddress) detach();
+    },
+    [networkId, selectedAddress, detach],
+  );
 
   const refresh = useCallback(async () => {
     if (status.kind !== 'attached') return;
@@ -203,16 +317,20 @@ export function CftProvider({ children }: { children: ReactNode }) {
   const value = useMemo<CftContextValue>(
     () => ({
       status,
-      accountId: identity ? CftPrivateState.accountIdHex(identity) : undefined,
+      tokens,
+      selectedAddress,
+      accountId,
       deploy,
       join,
+      select: join,
+      forget,
       detach,
       refresh,
       register: () => runTx('Registering…', (c) => c.register()),
       sweep: () => runTx('Sweeping…', (c) => c.sweep()),
-      transfer: (to, amount) => runTx('Transferring…', (c) => c.transfer(to, amount)),
+      transfer: (to, amount) => runTx('Sending…', (c) => c.transfer(to, amount)),
       burn: (amount) => runTx('Burning…', (c) => c.burn(amount)),
-      mint: (to, amount) => runTx('Minting…', (c) => c.mint(to, amount)),
+      mint: (to, amount) => runTx('Issuing…', (c) => c.mint(to, amount)),
       setKnownSpendable: async (amount) => {
         if (status.kind !== 'attached') return;
         await status.client.setKnownSpendable(amount);
@@ -220,7 +338,7 @@ export function CftProvider({ children }: { children: ReactNode }) {
       },
       lastReceipt,
     }),
-    [status, identity, deploy, join, detach, refresh, runTx, lastReceipt],
+    [status, tokens, selectedAddress, accountId, deploy, join, forget, detach, refresh, runTx, lastReceipt],
   );
 
   return <CftContext.Provider value={value}>{children}</CftContext.Provider>;

@@ -1,6 +1,7 @@
 /**
  * Midnight network identifiers understood by DApp Connector v4 `connect(networkId)`,
  * plus the public service endpoints the dApp uses to read chain state.
+ * The app has no network selector: it follows the network the wallet is on.
  *
  * - preview    — public development network
  * - preprod    — public staging network
@@ -14,7 +15,7 @@ export interface NetworkInfo {
   id: NetworkId;
   label: string;
   description: string;
-  /** Shown under the selector when this network is chosen. */
+  /** Shown in the header when connected to this network. */
   caution?: string;
   /** Indexer GraphQL endpoint (reads contract state). */
   indexer: string;
@@ -68,5 +69,8 @@ export function isNetworkId(value: unknown): value is NetworkId {
 
 const envDefault = import.meta.env.VITE_DEFAULT_NETWORK_ID;
 
-/** Initial selector value: env override if valid, otherwise `preview`. */
+/**
+ * Network tried first when connecting, before the wallet has told us which one
+ * it is on (the app then follows the wallet). Env override if valid, else `preview`.
+ */
 export const DEFAULT_NETWORK_ID: NetworkId = isNetworkId(envDefault) ? envDefault : 'preview';

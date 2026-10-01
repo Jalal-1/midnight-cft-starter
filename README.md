@@ -17,11 +17,12 @@ and a headless CLI for seed-based deployments and end-to-end checks.
 apps/web/                 Vite + React 19 + TypeScript + Tailwind v4
   src/midnight/
     networks.ts           network ids, labels, indexer / proof-server endpoints
-    wallet.ts             discovery (window.midnight), error mapping, formatting helpers
-    WalletProvider.tsx    React context: detect → connect → connected (DApp Connector v4)
+    wallet.ts             1AM discovery (window.midnight), error mapping, formatting helpers
+    WalletProvider.tsx    React context: detect → connect (follows the wallet's network) → connected; auto-reconnect
     providers.ts          Midnight.js providers on top of the connected wallet
-    CftProvider.tsx       React context: deploy / join / register / mint / transfer / sweep / burn
-  src/components/         NetworkSelect, ConnectWalletButton, WalletCard, ContractPanel, AccountPanel
+    CftProvider.tsx       React context: tokens per network, deploy / join / register / issue / send / sweep / burn
+    glossary.ts           field explanations taken from the OpenZeppelin module's documentation
+  src/components/         Header, ConnectScreen, TokensPanel, TokenDetails, AccountCard, ActionsPanel, Glossary
 packages/contract/        The contract and its TypeScript SDK (@midnight-starter/contract)
   src/cft.compact         wrapper around OpenZeppelin ConfidentialFungibleToken + PublicSupply + Ownable
   src/witnesses.ts        private state (SK / EK / plaintext cache) and the OZ witnesses
@@ -56,23 +57,32 @@ pnpm build:contract   # TypeScript SDK → packages/contract/dist
 pnpm dev              # http://localhost:5173
 ```
 
-In the browser: pick a network, **Connect 1AM**, then either **Deploy a new token** (you become the
-issuer) or **Join an existing token** by contract address. Then **Register** your confidential
-account, **Mint** (issuer), **Sweep**, **Send confidentially**, **Burn**.
+In the browser: **Connect 1AM** (the app follows whichever network the wallet is on), then **+ Deploy**
+a token (you become the issuer) or **Join** one by contract address. Select it in **Your tokens**, then
+**Register** your confidential account, **Issue** to a registered account (issuer), **Sweep**, **Send
+confidentially**, **Burn**. Every field has a "?" with the explanation from the contract's own
+documentation, and the **Glossary** button collects them all.
+
+The dashboard is a fixed, app-like view (panels scroll, the page does not). The connection, the
+network, your tokens per network and your confidential identity per wallet all survive a reload.
 
 `pnpm compile:fast` skips proving-key generation (type-checking the contract only); the app needs the
 full `pnpm compile` to prove transactions.
 
 ## Networks
 
-| Selector   | Connector `networkId` | Indexer                                   | Notes                                               |
-| ---------- | --------------------- | ----------------------------------------- | --------------------------------------------------- |
-| Preview    | `preview`             | indexer.preview.midnight.network          | Public dev network. Recommended default.            |
-| Preprod    | `preprod`             | indexer.preprod.midnight.network          | Public staging network.                             |
-| Undeployed | `undeployed`          | 127.0.0.1:8088 (`pnpm devnet:up`)         | Local devnet. Wallet must be configured for it.     |
-| Mainnet    | `mainnet`             | indexer.mainnet.midnight.network          | Real funds.                                         |
+There is no network selector in the UI: the network is chosen in 1AM. On connect the app asks for the
+last network it saw (or `VITE_DEFAULT_NETWORK_ID`, default `preview`), reads back the network the wallet
+is actually on, reconnects on that one and shows it in the top bar. If you switch networks inside the
+wallet, the app follows within a few seconds. Tokens and accounts are remembered per network.
 
-The wallet must be on the same network you select; the connect step fails with a clear message otherwise.
+| Network    | Connector `networkId` | Indexer                                   | Notes                                           |
+| ---------- | --------------------- | ----------------------------------------- | ----------------------------------------------- |
+| Preview    | `preview`             | indexer.preview.midnight.network          | Public dev network.                             |
+| Preprod    | `preprod`             | indexer.preprod.midnight.network          | Public staging network.                         |
+| Undeployed | `undeployed`          | 127.0.0.1:8088 (`pnpm devnet:up`)         | Local devnet. Wallet must be configured for it. |
+| Mainnet    | `mainnet`             | indexer.mainnet.midnight.network          | Real funds.                                     |
+
 Endpoints live in `apps/web/src/midnight/networks.ts` and `packages/deploy/src/config.ts`.
 
 ## The contract
@@ -125,8 +135,9 @@ secret) and reused on the next deploy; addresses are appended to `deployments.tx
 
 ## How the pieces fit
 
-1. **Wallet connection** (`WalletProvider.tsx`): enumerate `window.midnight`, `connect(networkId)`,
-   verify the network, read addresses and the shielded public keys Midnight.js needs.
+1. **Wallet connection** (`WalletProvider.tsx`): find 1AM under `window.midnight`, `connect()` with the
+   last known network, follow the network the wallet reports, read addresses and the shielded public
+   keys Midnight.js needs. The connection is restored on reload until you disconnect.
 2. **Providers** (`providers.ts`): proofs are delegated to the wallet when it exposes
    `getProvingProvider` (1AM proves in-wallet; no proof server needed), otherwise sent to an HTTP
    proof server. Transactions are balanced, signed and submitted by the wallet via
@@ -152,7 +163,8 @@ secret) and reused on the next deploy; addresses are appended to `deployments.tx
 ## Troubleshooting
 
 - **"No Midnight wallet detected"** — install the extension, then refresh the page.
-- **Network mismatch error** — switch the network inside the wallet, or change the selector, and reconnect.
+- **"1AM is on network X, which this app does not know"** — the wallet reports a network id this template
+  has no endpoints for; add it to `apps/web/src/midnight/networks.ts`.
 - **`checkRuntimeVersion` / version mismatch at load** — the compiler, `compact-runtime`, `ledger-v8` and
   the network must agree. This template pins compiler 0.31.1 ↔ runtime 0.16.0 ↔ ledger 8.1.0 (see
   `pnpm-workspace.yaml` overrides and https://docs.midnight.network/relnotes/support-matrix). Do not

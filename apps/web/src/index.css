@@ -16,8 +16,15 @@
   color-scheme: dark;
 }
 
+/* Fixed, app-like viewport: the page itself never scrolls, panels do. */
+html,
+body,
+#root {
+  height: 100%;
+}
+
 body {
-  @apply bg-night-950 text-slate-200 antialiased;
+  @apply overflow-hidden bg-night-950 text-slate-200 antialiased;
   font-family:
     ui-sans-serif,
     system-ui,
@@ -27,4 +34,10 @@ body {
     'Helvetica Neue',
     Arial,
     sans-serif;
+}
+
+/* Thin, unobtrusive scrollbars inside panels. */
+.panel-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-night-600) transparent;
 }
