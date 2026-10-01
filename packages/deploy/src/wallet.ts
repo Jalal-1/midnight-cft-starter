@@ -5,6 +5,7 @@ import * as ledger from '@midnight-ntwrk/ledger-v8';
 import { nativeToken } from '@midnight-ntwrk/ledger-v8';
 import { getNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
 import type { MidnightProvider, UnboundTransaction, WalletProvider } from '@midnight-ntwrk/midnight-js-types';
+import { MidnightBech32m, UnshieldedAddress } from '@midnight-ntwrk/wallet-sdk-address-format';
 import { DustWallet } from '@midnight-ntwrk/wallet-sdk-dust-wallet';
 import { WalletFacade } from '@midnight-ntwrk/wallet-sdk-facade';
 import { HDWallet, Roles } from '@midnight-ntwrk/wallet-sdk-hd';
@@ -73,6 +74,10 @@ export const startWallet = async (config: NetworkConfig, seedHex: string): Promi
   return { wallet, shieldedSecretKeys, dustSecretKey, unshieldedKeystore, address: unshieldedKeystore.getBech32Address().toString() };
 };
 
+export const stopWallet = async (hw: HeadlessWallet): Promise<void> => {
+  await hw.wallet.stop().catch(() => undefined);
+};
+
 const synced = (w: WalletFacade) => w.state().pipe(Rx.filter((s) => s.isSynced));
 
 export const waitForSync = (w: WalletFacade) => Rx.firstValueFrom(synced(w).pipe(Rx.throttleTime(3_000)));
@@ -124,6 +129,44 @@ export const ensureDust = async (hw: HeadlessWallet): Promise<bigint> => {
       ),
     ),
   );
+};
+
+/** Wait until the wallet's DUST balance reaches `minimum` (fees are paid in DUST). */
+export const waitForDustAtLeast = (w: WalletFacade, minimum: bigint): Promise<bigint> =>
+  Rx.firstValueFrom(
+    synced(w).pipe(
+      Rx.throttleTime(2_000),
+      Rx.map((s) => s.dust.balance(new Date())),
+      Rx.filter((b) => b >= minimum),
+    ),
+  );
+
+/** A fresh random 32-byte seed (hex) for a throwaway wallet. */
+export const randomSeedHex = (): string => Buffer.from(globalThis.crypto.getRandomValues(new Uint8Array(32))).toString('hex');
+
+/**
+ * Send unshielded NIGHT from `from` to several bech32m addresses in one
+ * transaction. Used to fund throwaway fee wallets on the devnet.
+ */
+export const sendNight = async (from: HeadlessWallet, outputs: { address: string; amount: bigint }[]): Promise<ledger.TransactionId> => {
+  const networkId = getNetworkId();
+  const recipe = await from.wallet.transferTransaction(
+    [
+      {
+        type: 'unshielded',
+        outputs: outputs.map((o) => ({
+          type: nativeToken().raw,
+          receiverAddress: MidnightBech32m.parse(o.address).decode(UnshieldedAddress, networkId),
+          amount: o.amount,
+        })),
+      },
+    ],
+    { shieldedSecretKeys: from.shieldedSecretKeys, dustSecretKey: from.dustSecretKey },
+    { ttl: new Date(Date.now() + 30 * 60 * 1000) },
+  );
+  const signed = await from.wallet.signRecipe(recipe, (data) => from.unshieldedKeystore.signData(data));
+  const finalized = await from.wallet.finalizeRecipe(signed);
+  return from.wallet.submitTransaction(finalized);
 };
 
 /** Bridge the wallet SDK to Midnight.js: balance (pay fees), sign and submit. */

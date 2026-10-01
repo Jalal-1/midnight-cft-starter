@@ -24,6 +24,7 @@
     "devnet:down": "docker compose -f docker/standalone.yml down -v",
     "devnet:logs": "docker compose -f docker/standalone.yml logs -f",
     "proof-server:up": "docker compose -f docker/proof-server.yml up -d",
-    "proof-server:down": "docker compose -f docker/proof-server.yml down"
+    "proof-server:down": "docker compose -f docker/proof-server.yml down",
+    "bench": "pnpm --filter @midnight-starter/deploy run bench"
   }
 }

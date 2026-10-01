@@ -8,7 +8,8 @@
     "deploy:contract": "tsx src/deploy.ts",
     "e2e": "tsx src/e2e.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "tsc -p tsconfig.json --noEmit"
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "bench": "tsx src/bench.ts"
   },
   "dependencies": {
     "@midnight-ntwrk/compact-runtime": "0.16.0",

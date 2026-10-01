@@ -135,6 +135,42 @@ SEED=<64 hex chars> pnpm e2e -- --network preview
 The issuer identity is written to `packages/deploy/.state/<network>/issuer.json` (gitignored, keep it
 secret) and reused on the next deploy; addresses are appended to `deployments.txt` next to it.
 
+## Benchmark: how many balance updates fit in one block?
+
+`pnpm bench` measures per-block concurrency on a real network (the local devnet by default). It deploys
+a fresh token, gives every sender its own funded fee wallet (like real users), builds and proves N
+transfers against the same chain state, submits them all in the same instant, then reads back from the
+indexer which block included each one and whether it succeeded.
+
+```bash
+pnpm devnet:up
+pnpm bench -- --mode disjoint --senders 10   # 10 users → 10 other users, independently
+pnpm bench -- --mode fanin    --senders 4    # 4 users → the same recipient
+```
+
+Three things bound the answer, and the benchmark separates them:
+
+- **Fees.** Every transaction spends DUST, and a wallet's DUST is one coin that is spent and re-created
+  per transaction, so one wallet pays for one transaction per block. The benchmark therefore funds one
+  wallet per sender (a single wallet can get more by splitting its NIGHT into several registered UTXOs).
+  A transaction the node rejects still leaves its DUST input pending in the wallet; call
+  `revertTransaction` before retrying, or the retry fails with "could not balance dust".
+- **Gas.** A transaction carries the gas its transcript needed against the state it was built on. When
+  another transaction in the same block has grown the same ledger map first, replaying costs more and
+  the node rejects it at pre-dispatch with `Transcript(Execution(OutOfGas))`. Ten simultaneous
+  `register` calls (ten inserts into the same maps) got two through per block for this reason.
+- **Contract state.** From the module's own "Concurrency" notes: a transfer reads and writes the
+  sender's balance and the recipient's pending pool, memo list and credit counter, so transfers between
+  **disjoint** pairs touch different ledger cells, while two credits to the **same** recipient in one
+  block conflict and the later one fails. Mint and burn also touch the public `totalSupply`.
+
+Operational note for the local stack: the indexer image (4.3.5) crash-loops when a dozen wallets sync
+at once, so the benchmark keeps at most two wallets live (the funder and the sender currently
+building or balancing) and relays all finalized transactions through the funder's connection.
+
+The benchmark prints the per-block histogram with each transaction's status and fee, the proving and
+balancing times, and verifies the ledger afterwards.
+
 ## How the pieces fit
 
 1. **Wallet connection** (`WalletProvider.tsx`): find 1AM under `window.midnight`, `connect()` with the
@@ -174,6 +210,7 @@ build with `VITE_BASE=/that-path/`.
 | `pnpm typecheck`      | Type-check every workspace                                       |
 | `pnpm devnet:up/down` | Start / stop the local devnet                                    |
 | `pnpm deploy:contract`, `pnpm e2e` | Headless deploy / end-to-end check (`-- --network <name>`)   |
+| `pnpm bench`          | Per-block concurrency benchmark (`-- --mode disjoint\|fanin --senders N`) |
 
 ## Troubleshooting
 

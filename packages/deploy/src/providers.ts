@@ -26,7 +26,13 @@ export const compiledContract = makeCompiledContract(ZK_ASSETS_DIR);
  * One provider set per actor. The fee-paying wallet can be shared, but each
  * actor needs its own private-state store (it holds that actor's SK / EK).
  */
-export const makeProviders = async (config: NetworkConfig, wallet: HeadlessWallet, actor: string): Promise<CftProviders> => {
+export const makeProviders = async (
+  config: NetworkConfig,
+  wallet: HeadlessWallet,
+  actor: string,
+  /** Scope of the private-state store; defaults to the fee wallet's address. */
+  privateStateScope: string = wallet.address,
+): Promise<CftProviders> => {
   const zkConfigProvider = new NodeZkConfigProvider<CftCircuitId>(ZK_ASSETS_DIR);
   const walletAndMidnight = await walletProviders(wallet);
   return {
@@ -34,7 +40,7 @@ export const makeProviders = async (config: NetworkConfig, wallet: HeadlessWalle
       midnightDbName: path.join(STATE_DIR, config.name, 'private-state', actor),
       privateStateStoreName: 'cft',
       privateStoragePasswordProvider: () => process.env.PRIVATE_STATE_PASSWORD ?? 'Midnight-Starter-Dev-2026!',
-      accountId: wallet.address,
+      accountId: privateStateScope,
     }),
     publicDataProvider: indexerPublicDataProvider(config.indexer, config.indexerWS),
     zkConfigProvider,
