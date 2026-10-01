@@ -1,5 +1,7 @@
 # Midnight Starter
 
+**Live demo:** https://jalal-1.github.io/midnight-cft-starter/ · **Source:** https://github.com/Jalal-1/midnight-cft-starter
+
 A forkable starter template for building dApps on the [Midnight](https://midnight.network) network.
 It ships a deployable **ConfidentialFungibleToken** (OpenZeppelin Contracts for Compact), a
 browser frontend that connects to the [1AM](https://1am.xyz) wallet and deploys / uses the token,
@@ -153,6 +155,8 @@ The web app is a static site: proving happens inside 1AM and chain state is read
 indexer, so no server is needed. `.github/workflows/deploy-pages.yml` builds everything (installing the
 pinned Compact toolchain and caching the compiled contract) and publishes `apps/web/dist` to **GitHub
 Pages** on every push to `main`. Turn it on once under Settings → Pages → Source: *GitHub Actions*.
+The reference deployment is https://jalal-1.github.io/midnight-cft-starter/. After forking, the same
+workflow publishes your fork at `https://<you>.github.io/<repo>/` with no changes.
 
 Any other static host works the same way: run `pnpm compile && pnpm build` and upload `apps/web/dist`
 (about 60 MB, mostly proving keys; the largest file is 22 MB). When the site is served under a sub-path,
