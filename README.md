@@ -17,7 +17,7 @@ docker/             local devnet (node, indexer, proof server) and a standalone 
 
 `packages/contract` is what you take into your own solution. It has three parts.
 
-**The contract** (`src/cft.compact`) composes three audited OpenZeppelin modules from
+**The contract** (`src/cft.compact`) composes three OpenZeppelin modules from
 `@openzeppelin/compact-contracts` 0.3.0-rc.1 and exports a deliberately small surface:
 
 | Circuit | Who | Effect | What becomes public |
@@ -35,8 +35,9 @@ are one `export circuit` away in the same file; see [Extending](#extending).
 module, the prover and verifier keys (about 48 MB) and the circuit IR. The web app serves it; the CLI
 reads it from disk.
 
-**The SDK** (`src/client.ts` and friends) gives you deploy / join, every token operation, the five
-witnesses the module requires, and the cryptography to read encrypted balances:
+**The SDK** (`src/client.ts` and friends) gives you deploy / join, every token operation, the
+witnesses the modules require (four for the token, one for Ownable), and the cryptography to read
+encrypted balances:
 
 ```ts
 import { CftClient, CftPrivateState, deployCft, joinCft, makeCompiledContract, parseAmount } from '@midnight-starter/contract';
