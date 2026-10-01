@@ -8,7 +8,8 @@
 //
 //   pnpm bench -- --mode disjoint --senders 10    N users → N other users, independently
 //   pnpm bench -- --mode fanin    --senders 4     N users → the SAME recipient
-//   pnpm bench -- --mode fanout   --senders 4     ONE user → N recipients (N transfers at once)
+//   pnpm bench -- --mode fanout   --senders 4     ONE user → N recipients, N separate transactions at once
+//   pnpm bench -- --mode batch    --senders 10    ONE user (treasury) → N recipients in ONE transaction
 //
 // Three things bound the answer, and the benchmark separates them:
 //   1. Fees (DUST). Every transaction pays its fee in DUST, and a wallet's DUST
@@ -63,7 +64,7 @@ import {
 } from './wallet.js';
 
 const DECIMALS = 2;
-type Mode = 'disjoint' | 'fanin' | 'fanout';
+type Mode = 'disjoint' | 'fanin' | 'fanout' | 'batch';
 
 /** A CFT account plus (for senders) the seed of its own fee wallet. */
 interface Account {
@@ -138,7 +139,7 @@ const main = async () => {
   const seed = process.env.SEED ?? (networkName === 'standalone' ? GENESIS_SEED : undefined);
   if (!seed) throw new Error('SEED env var (hex) is required for public networks');
   const mode = arg('mode', 'disjoint') as Mode;
-  if (!['disjoint', 'fanin', 'fanout'].includes(mode)) throw new Error(`unknown --mode ${mode}`);
+  if (!['disjoint', 'fanin', 'fanout', 'batch'].includes(mode)) throw new Error(`unknown --mode ${mode}`);
   /** Number of concurrent transfers (= senders, except fan-out: one sender, N recipients). */
   const N = Number(arg('senders', '4'));
   const amount = parseAmount(arg('amount', '1.00')!, DECIMALS);
@@ -168,7 +169,7 @@ const main = async () => {
   const attach = async (account: Account, feeWallet: HeadlessWallet, address: string) => {
     const providers = await providersFor(account, feeWallet);
     const found = await joinCft(providers, compiledContract, address, account.identity);
-    return { providers, client: await CftClient.attach(providers, found, account.identity) };
+    return { providers, client: await CftClient.attach(providers, found, account.identity, compiledContract) };
   };
   /** Run `fn` with the account's own fee wallet live, then stop it (keeps indexer load low). */
   const withOwnWallet = async <T>(account: Account, fn: (w: HeadlessWallet) => Promise<T>): Promise<T> => {
@@ -196,16 +197,16 @@ const main = async () => {
   const address = deployed.deployTxData.public.contractAddress;
   const deployFee = BigInt(deployed.deployTxData.public.fees.paidFees);
   ok(`contract ${address} (deploy fee ${deployFee} specks)`);
-  const issuer = new CftClient(issuerProviders, deployed, issuerAccount.identity);
+  const issuer = new CftClient(issuerProviders, deployed, issuerAccount.identity, compiledContract);
 
   // ── Accounts and fee wallets ─────────────────────────────────────────────
-  const senderCount = mode === 'fanout' ? 1 : N;
+  const senderCount = mode === 'fanout' || mode === 'batch' ? 1 : N;
   const recipientCount = mode === 'fanin' ? 1 : N;
   const senders = Array.from({ length: senderCount }, (_, i) => newAccount(`sender-${i}`, true));
   const recipients = Array.from({ length: recipientCount }, (_, i) => newAccount(`recipient-${i}`, false));
   /** Transfer j: which sender pays and which recipient is credited. */
   const pairs = Array.from({ length: N }, (_, j) => ({
-    sender: senders[mode === 'fanout' ? 0 : j]!,
+    sender: senders[mode === 'fanout' || mode === 'batch' ? 0 : j]!,
     recipient: recipients[mode === 'fanin' ? 0 : j]!,
   }));
   // Fan-out: the single sender needs N DUST coins, i.e. N registered NIGHT UTXOs.
@@ -242,7 +243,7 @@ const main = async () => {
     setupTxs++;
     return r;
   };
-  const mintPerSender = amount * BigInt(mode === 'fanout' ? N * 2 : 10);
+  const mintPerSender = amount * BigInt(mode === 'fanout' || mode === 'batch' ? N * 2 : 10);
   for (const s of senders) {
     await withOwnWallet(s, async (w) => {
       // Recipients have no wallet of their own; this sender's wallet pays for its recipients.
@@ -259,6 +260,53 @@ const main = async () => {
     });
   }
   log(`setup: ${setupTxs} transactions in ${((Date.now() - setupStarted) / 1000).toFixed(0)}s`);
+
+  if (mode === 'batch') {
+    // ── Treasury batch: N chained transfers in ONE transaction ──────────────
+    heading(`Batch: ${N} transfers from ${senders[0]!.name} in one transaction`);
+    const s = senders[0]!;
+    const stateHeight = await blockHeight(config);
+    const result = await withOwnWallet(s, async (w) => {
+      const { client } = await attach(s, w, address);
+      const t0 = Date.now();
+      const submitHeight = await blockHeight(config);
+      try {
+        const r = await client.transferBatch(recipients.map((rcp) => ({ to: rcp.accountId, value: amount })));
+        return { ok: true as const, r, ms: Date.now() - t0, submitHeight };
+      } catch (e) {
+        return { ok: false as const, error: rootCause(e), ms: Date.now() - t0, submitHeight };
+      }
+    });
+    heading('Results');
+    if (result.ok) {
+      const data = await issuerProviders.publicDataProvider.watchForTxData(result.r.txId);
+      const segments = data.segmentStatusMap ? [...data.segmentStatusMap.entries()].map(([id, st]) => `${id}:${st}`).join(', ') : 'n/a';
+      log(`one transaction ${result.r.txId.slice(0, 16)}… with ${N} transfer calls, built from block ${stateHeight}, included in block ${result.r.blockHeight} (+${result.r.blockHeight - result.submitHeight} after submit)`);
+      log(`status ${data.status}; segments ${segments}; fee ${data.fees.paidFees} specks; build+prove+balance+confirm ${(result.ms / 1000).toFixed(1)}s`);
+      ok(`${N} balance updates from one wallet in one block, one DUST fee`);
+    } else {
+      warn(`batch failed after ${(result.ms / 1000).toFixed(1)}s: ${result.error}`);
+      const reasons = await nodeRejectionReasons(networkName, Date.now() - result.ms);
+      if (reasons) log(`node pre-dispatch rejections: ${reasons}`);
+    }
+    heading('Ledger check');
+    const token = await issuer.token();
+    log(`totalSupply ${formatAmount(token.totalSupply, DECIMALS)} BNCH, registered ${token.accounts.length}`);
+    let credited = 0;
+    for (const r of recipients) {
+      const { client } = await attach(r, funder, address);
+      const b = await client.balances();
+      if (b.pending === amount) credited++;
+      log(`${r.name.padEnd(12)} pending=${formatAmount(b.pending ?? -1n, DECIMALS).padStart(8)} (${b.pendingSource}) credits=[${b.memos.map((m) => formatAmount(m, DECIMALS)).join(', ')}]`);
+    }
+    {
+      const { client } = await attach(s, funder, address);
+      const b = await client.balances();
+      log(`${s.name.padEnd(12)} spendable=${formatAmount(b.spendable ?? -1n, DECIMALS).padStart(8)} (${b.spendableSource})`);
+    }
+    ok(`${credited}/${N} recipients credited; done in ${((Date.now() - started) / 1000).toFixed(0)}s`);
+    process.exit(0);
+  }
 
   // ── Build + prove + balance N transfers against the same chain state ─────
   heading('Build, prove and balance (one sender wallet live at a time)');

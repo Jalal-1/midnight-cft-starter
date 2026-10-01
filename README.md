@@ -146,7 +146,8 @@ indexer which block included each one and whether it succeeded.
 pnpm devnet:up
 pnpm bench -- --mode disjoint --senders 10   # 10 users → 10 other users, independently
 pnpm bench -- --mode fanin    --senders 4    # 4 users → the same recipient
-pnpm bench -- --mode fanout   --senders 4    # 1 user → 4 recipients, 4 transfers at once
+pnpm bench -- --mode fanout   --senders 4    # 1 user → 4 recipients, 4 separate transactions at once
+pnpm bench -- --mode batch    --senders 10   # 1 treasury → 10 recipients in ONE transaction
 ```
 
 Three things bound the answer, and the benchmark separates them:
@@ -166,8 +167,9 @@ Three things bound the answer, and the benchmark separates them:
 - **Contract state.** From the module's own "Concurrency" notes: a transfer reads and writes the
   sender's balance and the recipient's pending pool, memo list and credit counter, so transfers between
   **disjoint** pairs touch different ledger cells, while two credits to the **same** recipient (or two
-  debits from the **same** sender) in one block conflict and only the first succeeds. Mint and burn
-  also touch the public `totalSupply`.
+  debits from the **same** sender) in one block conflict and only the first succeeds, unless they are
+  chained inside one transaction (see the treasury batch below). Mint and burn also touch the public
+  `totalSupply`.
 
 Operational note for the local stack: the indexer image (4.3.5) crash-loops when a dozen wallets sync
 at once, so the benchmark keeps at most two wallets live (the funder and the sender currently
@@ -182,12 +184,18 @@ Measured on the local devnet (node 1.0.2, indexer 4.3.5, proof server 8.1.0, ~6 
 | ------------------------------------------ | ------------------------------------------------------------------------------------------- |
 | 10 users → 10 other users, independently   | all 10 transfers in the same block (one block after submit), 10/10 succeeded: 20 balance updates in one block |
 | 4 users → the same recipient               | 1 succeeded; 3 included but `FailFallible` (fee paid, no state change): one credit per recipient per block |
-| 1 user → 4 recipients, 4 transfers at once | wallet (4 registered NIGHT UTXOs) could pay for 2 of 4; of those, 1 succeeded and 1 `FailFallible`: one debit per sender per block |
+| 1 user → 4 recipients, 4 separate transactions | wallet (4 registered NIGHT UTXOs) could pay for 2 of 4; of those, 1 succeeded and 1 `FailFallible`: one debit per sender per block |
+| 1 treasury → 10 recipients, one transaction | `SucceedEntirely`: 10 chained transfer calls as segments 1..10, all 10 recipients credited in one block, one DUST fee, ~53 s end to end |
 | 10 simultaneous `register` calls           | 2 accepted per block; the rest rejected at pre-dispatch (execution-cost budget exceeded, `OutOfGas`) and must be rebuilt |
 
-One-to-many is therefore inherently sequential: a sender can move value once per block, and must
-rebuild each following transfer against the new balance. Per transfer on this machine: build ~1 s,
-prove ~6 s, balance <1 s. The ceiling for independent pairs
+So a sender cannot fan out with *separate* transactions: it has no way to order them inside a block
+(Midnight has no account nonces), and every one after the first sees a balance that has already
+changed. What a treasury does instead is put the whole fan-out into **one transaction**:
+`CftClient.transferBatch` builds each transfer against the state the previous one leaves behind and
+places the calls as segments 1..N; the ledger executes a transaction's segments in ascending segment
+id, so the chain is deterministic, and one DUST fee pays for all of it. (Midnight.js's own scoped
+transactions give each call a random segment id, which is why the first attempt at this succeeded for
+one call only.) Per transfer on this machine: build ~1 s, prove ~6 s, balance <1 s. The ceiling for independent pairs
 was not reached at 10; raise `--senders` to look for it (each extra sender adds about four setup
 transactions, roughly 100 s).
 

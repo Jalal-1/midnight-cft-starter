@@ -14,7 +14,7 @@
 // provider can persist, export and import it.
 import type { WitnessContext } from '@midnight-ntwrk/compact-runtime';
 import type { ElGamal_Ciphertext, Ledger, Witnesses } from './managed/cft/contract/index.js';
-import { accountIdFromSecretKey, ctKey, fromHex, isZeroCiphertext, randomBytes32, scalarToHex, toHex, viewingScalar } from './crypto.js';
+import { accountIdFromSecretKey, ctKey, fromHex, isZeroCiphertext, randomBytes32, scalarToHex, toHex, verifyBalance, viewingScalar } from './crypto.js';
 
 export type CftPrivateState = {
   /** 32-byte account secret (hex). Identity for the CFT and, for the issuer, Ownable. */
@@ -96,21 +96,31 @@ export const witnesses: Witnesses<CftPrivateState> = {
   },
 
   wit_PlaintextBalance({ privateState }: Ctx, ct: ElGamal_Ciphertext): [CftPrivateState, bigint] {
-    const v = CftPrivateState.lookupPlaintext(privateState, ct);
-    if (v === undefined) {
-      throw new Error(
-        'wit_PlaintextBalance: no cached plaintext for the current balance ciphertext. ' +
-          'Sync the account first so the wallet knows its spendable balance.',
-      );
+    const cached = CftPrivateState.lookupPlaintext(privateState, ct);
+    if (cached !== undefined) return [privateState, cached];
+    // Not cached: the ciphertext may be one this wallet just produced itself
+    // (e.g. the second transfer of a batch sees the balance left by the first).
+    // Try the values the wallet expects after its own moves, verified against
+    // the ciphertext before use, and remember the match.
+    const scalar = viewingScalar(fromHex(privateState.encryptionKeyHex));
+    for (const candidate of privateState.spendableCandidates ?? []) {
+      const v = BigInt(candidate);
+      if (verifyBalance(ct, scalar, v)) return [CftPrivateState.cachePlaintext(privateState, ct, v), v];
     }
-    return [privateState, v];
+    throw new Error(
+      'wit_PlaintextBalance: no known plaintext for the current balance ciphertext. ' +
+        'Sync the account first so the wallet knows its spendable balance.',
+    );
   },
 
   wit_RandomnessSeed({ privateState }: Ctx): [CftPrivateState, Uint8Array] {
-    // The client rotates the seed before each tx; if it forgot, mint one here.
-    // The seed is threaded through the returned state so every witness call
-    // within the same invocation sees the same seed, as the module requires.
-    if (privateState.randomnessSeedHex) return [privateState, fromHex(privateState.randomnessSeedHex)];
+    // Seed freshness is load-bearing for confidentiality (see the module
+    // header): a reused seed leaks plaintext differences. Hand out a fresh
+    // CSPRNG seed on every call and thread it through the returned state, so
+    // consecutive calls in one batched transaction never share randomness.
+    // (A circuit that must re-derive the same randomness twice within one
+    // invocation, such as OZ's `approve` refund path, would instead need the
+    // seed held fixed for that invocation; this template does not export it.)
     const fresh = CftPrivateState.withFreshSeed(privateState);
     return [fresh, fromHex(fresh.randomnessSeedHex!)];
   },

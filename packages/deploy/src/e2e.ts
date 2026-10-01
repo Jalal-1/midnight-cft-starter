@@ -60,12 +60,12 @@ const main = async () => {
   );
   const address = deployed.deployTxData.public.contractAddress;
   ok(`contract address: ${c.bold}${address}${c.reset}`);
-  const issuer = new CftClient(issuerProviders, deployed, issuerState);
+  const issuer = new CftClient(issuerProviders, deployed, issuerState, compiledContract);
 
   const aliceProviders = await makeProviders(config, wallet, `e2e-${run}-alice`);
   const bobProviders = await makeProviders(config, wallet, `e2e-${run}-bob`);
-  const alice = new CftClient(aliceProviders, await joinCft(aliceProviders, compiledContract, address, aliceState), aliceState);
-  const bob = new CftClient(bobProviders, await joinCft(bobProviders, compiledContract, address, bobState), bobState);
+  const alice = new CftClient(aliceProviders, await joinCft(aliceProviders, compiledContract, address, aliceState), aliceState, compiledContract);
+  const bob = new CftClient(bobProviders, await joinCft(bobProviders, compiledContract, address, bobState), bobState, compiledContract);
 
   const show = async (label: string, who: CftClient) => {
     const b = await who.balances();

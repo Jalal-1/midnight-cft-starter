@@ -221,7 +221,7 @@ export function CftProvider({ children }: { children: ReactNode }) {
     (contractAddress: string) =>
       attach('join', contractAddress.trim(), async (providers, id) => {
         const found = await joinCft(providers, compiledContract, contractAddress, id);
-        return CftClient.attach(providers, found, id);
+        return CftClient.attach(providers, found, id, compiledContract);
       }),
     [attach],
   );
@@ -230,7 +230,7 @@ export function CftProvider({ children }: { children: ReactNode }) {
     (params: TokenParams) =>
       attach('deploy', undefined, async (providers, id) => {
         const deployed = await deployCft(providers, compiledContract, id, params);
-        return new CftClient(providers, deployed, id);
+        return new CftClient(providers, deployed, id, compiledContract);
       }),
     [attach],
   );

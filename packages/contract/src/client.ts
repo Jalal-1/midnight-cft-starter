@@ -3,13 +3,18 @@
 // bookkeeping (seed rotation, plaintext cache, memo replay) next to every
 // circuit call. Callers only have to supply `MidnightProviders`.
 import { CompiledContract, type ProvableCircuitId } from '@midnight-ntwrk/compact-js';
-import type { ContractAddress } from '@midnight-ntwrk/compact-runtime';
+// ChargedState must be the on-chain runtime's class (the one `nextContractState` belongs to).
+import { ChargedState, type ContractAddress } from '@midnight-ntwrk/compact-runtime';
+import { Transaction, type UnprovenTransaction } from '@midnight-ntwrk/ledger-v8';
 import {
+  createUnprovenCallTxFromInitialStates,
   deployContract,
   findDeployedContract,
+  submitTx,
   type DeployedContract,
   type FoundContract,
 } from '@midnight-ntwrk/midnight-js-contracts';
+import { getNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
 import type { FinalizedTxData, MidnightProviders } from '@midnight-ntwrk/midnight-js-types';
 import * as Cft from './managed/cft/contract/index.js';
 import { accountIdFromSecretKey, fromHex, hexToScalar, normalizeAccountId, toHex, verifyBalance } from './crypto.js';
@@ -126,6 +131,8 @@ export class CftClient {
     readonly contract: DeployedCft,
     /** The identity this client acts as; kept in sync with the private-state store. */
     readonly identity: CftPrivateState,
+    /** Needed for `transferBatch`, which assembles calls by hand. */
+    readonly compiledContract?: CftCompiledContract,
   ) {}
 
   /**
@@ -133,9 +140,14 @@ export class CftClient {
    * source of truth: if this provider already used the contract, the stored
    * SK / EK win over `suggested`, so a funded account can never be stranded.
    */
-  static async attach(providers: CftProviders, contract: DeployedCft, suggested: CftPrivateState): Promise<CftClient> {
+  static async attach(
+    providers: CftProviders,
+    contract: DeployedCft,
+    suggested: CftPrivateState,
+    compiledContract?: CftCompiledContract,
+  ): Promise<CftClient> {
     const stored = await providers.privateStateProvider.get(PRIVATE_STATE_ID);
-    return new CftClient(providers, contract, stored ?? suggested);
+    return new CftClient(providers, contract, stored ?? suggested, compiledContract);
   }
 
   get address(): string {
@@ -252,6 +264,80 @@ export class CftClient {
     const b = await this.prepareSpend((b) => b.spendable! - value);
     if (b.spendable! < value) throw new Error('insufficient spendable balance (sweep pending credits first?)');
     return receipt((await this.contract.callTx.burn(value)).public);
+  }
+
+  /**
+   * Several confidential transfers from this account in ONE transaction: a
+   * treasury paying many users in a single block.
+   *
+   * Each call is built against the contract state left by the previous one
+   * (so its proof matches the balance it will actually see), and the calls are
+   * placed in the transaction as segments 1..N. The ledger executes a
+   * transaction's segments in ascending segment-id order, which makes the
+   * chain deterministic. (Midnight.js's scoped transactions give each call a
+   * random segment id, so dependent calls would run in random order.) One
+   * DUST fee pays for the whole batch.
+   */
+  async transferBatch(outputs: { to: string; value: bigint }[]): Promise<TxReceipt & { segments: number }> {
+    if (outputs.length === 0) throw new Error('nothing to send');
+    if (!this.compiledContract) throw new Error('transferBatch needs the compiled contract (pass it to the CftClient constructor)');
+    const total = outputs.reduce((a, o) => a + o.value, 0n);
+    const b = await this.balances();
+    if (!b.registered) throw new Error('register first');
+    if (b.spendable === undefined) throw new Error(UNKNOWN_SPENDABLE);
+    if (b.spendable < total) throw new Error('insufficient spendable balance for the batch (sweep pending credits first?)');
+
+    // Each debit leaves a new balance ciphertext that exists only locally until
+    // the block lands; the witness recognises them through these expected
+    // values (verified against the ciphertext before use).
+    let privateState = await this.state();
+    let running = b.spendable;
+    for (const o of outputs) {
+      running -= o.value;
+      privateState = CftPrivateState.withSpendableCandidate(privateState, running);
+    }
+    privateState = CftPrivateState.withFreshSeed(privateState);
+
+    const address = this.address as ContractAddress;
+    const states = await this.providers.publicDataProvider.queryZSwapAndContractState(address);
+    if (!states) throw new Error(`contract ${this.address} not found on chain`);
+    const [zswapChainState, contractState, ledgerParameters] = states;
+    const coinPublicKey = this.providers.walletProvider.getCoinPublicKey();
+    const encryptionPublicKey = this.providers.walletProvider.getEncryptionPublicKey();
+
+    // Build the chain: call k+1 starts from the state call k produced.
+    let tx: UnprovenTransaction = Transaction.fromParts(getNetworkId());
+    for (const [i, o] of outputs.entries()) {
+      const call = await createUnprovenCallTxFromInitialStates<CftContract, 'transfer'>(
+        this.providers.zkConfigProvider,
+        {
+          compiledContract: this.compiledContract,
+          circuitId: 'transfer',
+          contractAddress: address,
+          args: [fromHex(normalizeAccountId(o.to)), o.value],
+          coinPublicKey,
+          initialContractState: contractState,
+          initialZswapChainState: zswapChainState,
+          ledgerParameters,
+          initialPrivateState: privateState,
+        },
+        encryptionPublicKey,
+      );
+      const intent = call.private.unprovenTx.intents ? [...call.private.unprovenTx.intents.values()][0] : undefined;
+      if (!intent) throw new Error('transfer call produced no intent');
+      tx = tx.addIntent({ tag: 'specific', value: i + 1 }, intent);
+      contractState.data = new ChargedState(call.public.nextContractState);
+      privateState = call.private.nextPrivateState;
+    }
+
+    // Prove every call, pay one fee, submit, wait for finality.
+    const data = await submitTx<CftContract, CftCircuitId>(this.providers, { unprovenTx: tx, circuitId: ['transfer' as CftCircuitId] });
+    if (data.status !== 'SucceedEntirely') {
+      const segments = data.segmentStatusMap ? [...data.segmentStatusMap.entries()].map(([id, st]) => `${id}:${st}`).join(', ') : 'n/a';
+      throw new Error(`batch ${data.status} in block ${data.blockHeight}; segments ${segments}`);
+    }
+    await this.setState(privateState);
+    return { ...receipt(data), segments: outputs.length };
   }
 
   /** Issuer only. Mints to a registered account; totalSupply increases publicly. */

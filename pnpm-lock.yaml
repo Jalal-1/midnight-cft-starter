@@ -111,7 +111,13 @@ importers:
       '@midnight-ntwrk/compact-runtime':
         specifier: 0.16.0
         version: 0.16.0
+      '@midnight-ntwrk/ledger-v8':
+        specifier: 8.1.0
+        version: 8.1.0
       '@midnight-ntwrk/midnight-js-contracts':
+        specifier: 4.1.1
+        version: 4.1.1
+      '@midnight-ntwrk/midnight-js-network-id':
         specifier: 4.1.1
         version: 4.1.1
       '@midnight-ntwrk/midnight-js-types':
