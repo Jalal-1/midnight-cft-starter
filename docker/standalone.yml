@@ -1,0 +1,49 @@
+# Local ledger-8 dev network: node + indexer + proof server, pinned to the same
+# component versions as Preview (node 1.0.2, indexer 4.3.5, proof server 8.1.0)
+# so a client built against ledger-v8 8.1.0 behaves the same locally.
+# The node's "dev" preset funds the genesis wallet (seed 00..01), so no faucet
+# is needed. Use network id "undeployed" to talk to it.
+# On Apple Silicon, use the "-arm64" image tags for node and indexer.
+services:
+  proof-server:
+    image: 'midnightntwrk/proof-server:8.1.0'
+    command: ['midnight-proof-server -v']
+    ports:
+      - '6300:6300'
+    environment:
+      RUST_BACKTRACE: 'full'
+
+  indexer:
+    image: 'midnightntwrk/indexer-standalone:4.3.5'
+    # The indexer exits if it starts before the node has produced its first
+    # blocks; let Docker retry until the chain is live.
+    restart: on-failure
+    ports:
+      - '8088:8088'
+    environment:
+      RUST_LOG: 'indexer=info,chain_indexer=info,indexer_api=info,wallet_indexer=info,indexer_common=info,fastrace_opentelemetry=off,info'
+      APP__APPLICATION__NETWORK_ID: 'undeployed'
+      APP__INFRA__SECRET: '303132333435363738393031323334353637383930313233343536373839303132'
+      APP__INFRA__NODE__URL: 'ws://node:9944'
+      APP__INFRA__SPO_NODE__URL: 'ws://node:9944'
+      APP__INFRA__SPO_NODE__BLOCKFROST_ID: 'dummy-not-using-spo'
+      APP__INFRA__STORAGE__PASSWORD: 'indexer'
+      APP__INFRA__PUB_SUB__PASSWORD: 'indexer'
+      APP__INFRA__LEDGER_STATE_STORAGE__PASSWORD: 'indexer'
+    depends_on:
+      node:
+        condition: service_healthy
+
+  node:
+    image: 'midnightntwrk/midnight-node:1.0.2'
+    ports:
+      - '9944:9944'
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:9944/health']
+      interval: 2s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    environment:
+      CFG_PRESET: 'dev'
+      SIDECHAIN_BLOCK_BENEFICIARY: '04bcf7ad3be7a5c790460be82a713af570f22e0f801f6659ab8e84a52be6969e'

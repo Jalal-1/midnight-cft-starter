@@ -19,3 +19,6 @@ dist/
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# headless deploy state (wallet db, issuer identity, deployments)
+packages/deploy/.state/

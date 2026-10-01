@@ -1,0 +1,120 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Midnight Starter: a minimal, deployable ConfidentialFungibleToken (CFT).
+//
+// Composes OpenZeppelin Contracts for Compact v0.3.0-rc.1 (installed from npm
+// as @openzeppelin/compact-contracts, the last line that targets the
+// ledger-8 / Compact 0.31 stack that Preview, Preprod and Mainnet run today):
+//
+//   ConfidentialFungibleToken   ElGamal-encrypted balances, ECDH memo channel,
+//                               register / sweep / transfer / _mint / _burn
+//   ...PublicSupply             public totalSupply paired with mint / burn
+//   Ownable                     issuer authority for mint
+//
+// Exported impure circuits (each one costs ~2.6 KB of the 50,000-byte deploy
+// write budget on public networks, so the surface is kept lean):
+//
+//   register()            holder publishes their encryption key (permissionless)
+//   sweep()               move incoming (pending) credits into the spendable balance
+//   transfer(to, value)   confidential transfer; amount hidden, (from, to) public
+//   burn(value)           holder burns from their own spendable balance
+//   mint(account, value)  issuer-only; totalSupply increases publicly
+//
+// Pure circuits run locally in the wallet (no proof, no fee): account id and
+// key derivation, memo decryption and balance verification helpers.
+//
+// Extend from here: add Pausable / freeze / allowances (approve, transferFrom)
+// by exporting more OZ circuits, keeping an eye on the deploy byte budget.
+
+pragma language_version >= 0.23.0;
+
+import CompactStandardLibrary;
+
+import "../node_modules/@openzeppelin/compact-contracts/token/ConfidentialFungibleToken" prefix CFT_;
+import "../node_modules/@openzeppelin/compact-contracts/token/extensions/ConfidentialFungibleTokenPublicSupply" prefix Supply_;
+import "../node_modules/@openzeppelin/compact-contracts/access/Ownable" prefix Ownable_;
+import "../node_modules/@openzeppelin/compact-contracts/crypto/ElGamal" prefix ElGamal_;
+import "../node_modules/@openzeppelin/compact-contracts/crypto/EcdhMask" prefix EcdhMask_;
+
+export { ElGamal_Ciphertext, EcdhMask_Ciphertext };
+
+export {
+  CFT__balances,
+  CFT__pending,
+  CFT__encryptionKeys,
+  CFT__memos,
+  CFT__creditEpochs,
+  CFT__name,
+  CFT__symbol,
+  CFT__decimals,
+  Supply__totalSupply,
+  Ownable__owner
+};
+
+constructor(
+  name_: Opaque<"string">,
+  symbol_: Opaque<"string">,
+  decimals_: Uint<8>,
+  issuer: Bytes<32>
+) {
+  CFT_initialize(name_, symbol_, decimals_);
+  Ownable_initialize(Either<Bytes<32>, ContractAddress> {
+    is_left: true,
+    left: issuer,
+    right: default<ContractAddress>
+  });
+}
+
+export circuit register(): Bytes<32> {
+  return CFT_register();
+}
+
+export circuit sweep(): Bytes<32> {
+  return CFT_sweep();
+}
+
+export circuit transfer(to: Bytes<32>, value: Uint<128>): Bytes<32> {
+  return CFT_transfer(to, value);
+}
+
+export circuit burn(value: Uint<128>): Bytes<32> {
+  const sender = CFT__burn(value);
+  Supply__subSupply(value);
+  return sender;
+}
+
+export circuit mint(account: Bytes<32>, value: Uint<128>): [] {
+  Ownable_assertOnlyOwner();
+  Supply__addSupply(value);
+  CFT__mint(account, value);
+}
+
+export pure circuit computeAccountId(sk: Bytes<32>): Bytes<32> {
+  return CFT_computeAccountId(sk);
+}
+
+export pure circuit derivePk(ek: Bytes<32>): JubjubPoint {
+  return ElGamal_derivePk(ek);
+}
+
+export pure circuit viewingScalar(ek: Bytes<32>): Field {
+  return ElGamal_secretToScalar(ek);
+}
+
+export pure circuit decryptMemo(memo: EcdhMask_Ciphertext, s: Field): Field {
+  return EcdhMask_decrypt(memo, s, pad(32, "OZ_CFT_ecdh_memo_v1"));
+}
+
+export pure circuit decryptToPoint(ct: ElGamal_Ciphertext, s: Field): JubjubPoint {
+  const shared = ecMul(ct.c1, s);
+  const neg = ElGamal_negate(ElGamal_Ciphertext { c1: shared, c2: shared });
+  return ecAdd(ct.c2, neg.c1);
+}
+
+export pure circuit valuePoint(value: Uint<128>): JubjubPoint {
+  return ecMulGenerator(value as Field);
+}
+
+export pure circuit addCiphertexts(a: ElGamal_Ciphertext, b: ElGamal_Ciphertext): ElGamal_Ciphertext {
+  return ElGamal_add(a, b);
+}

@@ -1,0 +1,36 @@
+{
+  "name": "@midnight-starter/contract",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ConfidentialFungibleToken (OpenZeppelin) wrapper contract for Midnight plus its TypeScript SDK",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src/cft.compact"
+  ],
+  "scripts": {
+    "compact": "compact compile +0.31.1 src/cft.compact src/managed/cft",
+    "compact:skip-zk": "compact compile +0.31.1 --skip-zk src/cft.compact src/managed/cft",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && cp -R src/managed dist/managed && cp src/cft.compact dist/",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist src/managed"
+  },
+  "dependencies": {
+    "@midnight-ntwrk/compact-js": "2.5.1",
+    "@midnight-ntwrk/compact-runtime": "0.16.0",
+    "@midnight-ntwrk/midnight-js-contracts": "4.1.1",
+    "@midnight-ntwrk/midnight-js-types": "4.1.1",
+    "@noble/curves": "^2.4.0",
+    "@openzeppelin/compact-contracts": "0.3.0-rc.1"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.0"
+  }
+}

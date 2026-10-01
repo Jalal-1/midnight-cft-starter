@@ -34,8 +34,9 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 }
 
 export function WalletCard() {
-  const { state, refreshBalances, revealShieldedAddress } = useWallet();
+  const { state, refreshBalances } = useWallet();
   const [refreshing, setRefreshing] = useState(false);
+  const [showShielded, setShowShielded] = useState(false);
   if (state.status !== 'connected') return null;
 
   const { wallet, networkId, address, shieldedAddress, balances, balancesError } = state;
@@ -69,7 +70,7 @@ export function WalletCard() {
         </Row>
 
         <Row label="Shielded">
-          {shieldedAddress ? (
+          {showShielded ? (
             <>
               <span className="font-mono" title={shieldedAddress}>
                 {truncateAddress(shieldedAddress)}
@@ -79,7 +80,7 @@ export function WalletCard() {
           ) : (
             <button
               type="button"
-              onClick={() => void revealShieldedAddress()}
+              onClick={() => setShowShielded(true)}
               className="text-xs text-glow-300 underline hover:text-glow-400"
             >
               Reveal

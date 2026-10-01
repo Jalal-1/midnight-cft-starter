@@ -1,7 +1,7 @@
 {
   "name": "midnight-starter",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Forkable starter template for building dApps on the Midnight network",
   "license": "Apache-2.0",
   "packageManager": "pnpm@11.21.0",
@@ -9,10 +9,21 @@
     "node": ">=22"
   },
   "scripts": {
+    "setup": "pnpm compile && pnpm build:contract",
+    "compile": "pnpm --filter @midnight-starter/contract compact",
+    "compile:fast": "pnpm --filter @midnight-starter/contract compact:skip-zk",
+    "build:contract": "pnpm --filter @midnight-starter/contract build",
     "dev": "pnpm --filter web dev",
-    "build": "pnpm --filter web build",
+    "build": "pnpm build:contract && pnpm --filter web build",
     "preview": "pnpm --filter web preview",
     "typecheck": "pnpm -r typecheck",
-    "lint": "pnpm -r lint"
+    "lint": "pnpm -r lint",
+    "deploy:contract": "pnpm --filter @midnight-starter/deploy run deploy:contract",
+    "e2e": "pnpm --filter @midnight-starter/deploy run e2e",
+    "devnet:up": "docker compose -f docker/standalone.yml up -d",
+    "devnet:down": "docker compose -f docker/standalone.yml down -v",
+    "devnet:logs": "docker compose -f docker/standalone.yml logs -f",
+    "proof-server:up": "docker compose -f docker/proof-server.yml up -d",
+    "proof-server:down": "docker compose -f docker/proof-server.yml down"
   }
 }

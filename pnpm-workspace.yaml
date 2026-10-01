@@ -1,3 +1,20 @@
 packages:
   - apps/*
   - packages/*
+
+# Pin the Midnight stack to the ledger-8 / Compact 0.31 line that Preview,
+# Preprod and Mainnet run today (see .compact-version and the support matrix at
+# https://docs.midnight.network/relnotes/support-matrix).
+overrides:
+  '@midnight-ntwrk/ledger-v8': 8.1.0
+  '@midnight-ntwrk/compact-runtime': 0.16.0
+  '@midnight-ntwrk/compact-js': 2.5.1
+  '@midnight-ntwrk/platform-js': 2.2.4
+  '@midnight-ntwrk/onchain-runtime-v3': 3.0.0
+
+# Native / binary post-install steps this workspace allows.
+onlyBuiltDependencies:
+  - classic-level
+  - esbuild
+  - '@swc/core'
+  - msgpackr-extract

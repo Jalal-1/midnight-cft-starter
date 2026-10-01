@@ -1,0 +1,11 @@
+# Local proof server matching the Preview / Preprod / Mainnet component matrix
+# (proof server 8.1.0, ledger 8). Only needed when proving is NOT delegated to
+# the wallet (1AM proves in-wallet) or for the headless CLI.
+services:
+  proof-server:
+    image: 'midnightntwrk/proof-server:8.1.0'
+    command: ['midnight-proof-server -v']
+    ports:
+      - '6300:6300'
+    environment:
+      RUST_BACKTRACE: 'full'

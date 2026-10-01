@@ -37,7 +37,9 @@ export type WalletState =
       api: ConnectedAPI;
       networkId: NetworkId;
       address: string;
-      shieldedAddress?: string;
+      shieldedAddress: string;
+      /** Bech32m shielded public keys Midnight.js needs to build transactions. */
+      keys: { coinPublicKey: string; encryptionPublicKey: string };
       balances?: Balances;
       balancesError?: string;
     }
@@ -55,7 +57,6 @@ export interface WalletContextValue {
   connect: (walletKey?: string) => Promise<void>;
   disconnect: () => void;
   refreshBalances: () => Promise<void>;
-  revealShieldedAddress: () => Promise<void>;
   rescanWallets: () => void;
 }
 
@@ -165,7 +166,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
           );
         }
 
-        const { unshieldedAddress } = await api.getUnshieldedAddress();
+        const [{ unshieldedAddress }, shielded] = await Promise.all([api.getUnshieldedAddress(), api.getShieldedAddresses()]);
         if (session !== sessionRef.current) return;
 
         setLastWalletKey(wallet.key);
@@ -177,6 +178,11 @@ export function WalletProvider({ children }: { children: ReactNode }) {
           api,
           networkId: target,
           address: unshieldedAddress,
+          shieldedAddress: shielded.shieldedAddress,
+          keys: {
+            coinPublicKey: shielded.shieldedCoinPublicKey,
+            encryptionPublicKey: shielded.shieldedEncryptionPublicKey,
+          },
         });
 
         // Balances are best-effort: a failure here should not undo a successful connection.
@@ -212,20 +218,6 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         setState({ status: 'disconnected', wallets: listWallets(), notice: describeError(error) });
         return;
       }
-      const balancesError = describeError(error);
-      setState((prev) => (prev.status === 'connected' ? { ...prev, balancesError } : prev));
-    }
-  }, [state]);
-
-  const revealShieldedAddress = useCallback(async () => {
-    if (state.status !== 'connected') return;
-    const session = sessionRef.current;
-    try {
-      const { shieldedAddress } = await state.api.getShieldedAddresses();
-      if (session !== sessionRef.current) return;
-      setState((prev) => (prev.status === 'connected' ? { ...prev, shieldedAddress } : prev));
-    } catch (error) {
-      if (session !== sessionRef.current) return;
       const balancesError = describeError(error);
       setState((prev) => (prev.status === 'connected' ? { ...prev, balancesError } : prev));
     }
@@ -272,7 +264,6 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       connect,
       disconnect,
       refreshBalances,
-      revealShieldedAddress,
       rescanWallets: () => void detect(),
     }),
     [
@@ -284,7 +275,6 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       connect,
       disconnect,
       refreshBalances,
-      revealShieldedAddress,
       detect,
     ],
   );
