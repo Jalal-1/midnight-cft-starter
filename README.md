@@ -146,23 +146,28 @@ indexer which block included each one and whether it succeeded.
 pnpm devnet:up
 pnpm bench -- --mode disjoint --senders 10   # 10 users → 10 other users, independently
 pnpm bench -- --mode fanin    --senders 4    # 4 users → the same recipient
+pnpm bench -- --mode fanout   --senders 4    # 1 user → 4 recipients, 4 transfers at once
 ```
 
 Three things bound the answer, and the benchmark separates them:
 
-- **Fees.** Every transaction spends DUST, and a wallet's DUST is one coin that is spent and re-created
-  per transaction, so one wallet pays for one transaction per block. The benchmark therefore funds one
-  wallet per sender (a single wallet can get more by splitting its NIGHT into several registered UTXOs).
-  A transaction the node rejects still leaves its DUST input pending in the wallet; call
-  `revertTransaction` before retrying, or the retry fails with "could not balance dust".
-- **Gas.** A transaction carries the gas its transcript needed against the state it was built on. When
-  another transaction in the same block has grown the same ledger map first, replaying costs more and
-  the node rejects it at pre-dispatch with `Transcript(Execution(OutOfGas))`. Ten simultaneous
-  `register` calls (ten inserts into the same maps) got two through per block for this reason.
+- **Fees (DUST).** Every transaction pays its fee in DUST, and a wallet holds its DUST as one coin per
+  registered NIGHT UTXO. A coin is spent and re-created per transaction, so a wallet with one coin pays
+  for one transaction per block. The benchmark therefore funds one wallet per sending user, and gives
+  the fan-out sender N NIGHT UTXOs so it holds N DUST coins. A transaction the node rejects still leaves
+  its DUST coin pending in the wallet; call `revertTransaction` before retrying, or the retry fails with
+  "could not balance dust".
+- **Execution-cost budget.** A transaction declares the cost of replaying its transcript, measured
+  against the state it was built on; the DUST fee covers that budget. When another transaction in the
+  same block has grown the same ledger map first, replaying costs more than declared and the node
+  rejects it at pre-dispatch. The node's internal name for this is `Transcript(Execution(OutOfGas))`.
+  Ten simultaneous `register` calls (ten inserts into the same maps) got two through per block for
+  this reason.
 - **Contract state.** From the module's own "Concurrency" notes: a transfer reads and writes the
   sender's balance and the recipient's pending pool, memo list and credit counter, so transfers between
-  **disjoint** pairs touch different ledger cells, while two credits to the **same** recipient in one
-  block conflict and the later one fails. Mint and burn also touch the public `totalSupply`.
+  **disjoint** pairs touch different ledger cells, while two credits to the **same** recipient (or two
+  debits from the **same** sender) in one block conflict and only the first succeeds. Mint and burn
+  also touch the public `totalSupply`.
 
 Operational note for the local stack: the indexer image (4.3.5) crash-loops when a dozen wallets sync
 at once, so the benchmark keeps at most two wallets live (the funder and the sender currently
@@ -177,9 +182,12 @@ Measured on the local devnet (node 1.0.2, indexer 4.3.5, proof server 8.1.0, ~6 
 | ------------------------------------------ | ------------------------------------------------------------------------------------------- |
 | 10 users → 10 other users, independently   | all 10 transfers in the same block (one block after submit), 10/10 succeeded: 20 balance updates in one block |
 | 4 users → the same recipient               | 1 succeeded; 3 included but `FailFallible` (fee paid, no state change): one credit per recipient per block |
-| 10 simultaneous `register` calls           | 2 accepted per block; the rest rejected at pre-dispatch with `OutOfGas` and must be rebuilt |
+| 1 user → 4 recipients, 4 transfers at once | wallet (4 registered NIGHT UTXOs) could pay for 2 of 4; of those, 1 succeeded and 1 `FailFallible`: one debit per sender per block |
+| 10 simultaneous `register` calls           | 2 accepted per block; the rest rejected at pre-dispatch (execution-cost budget exceeded, `OutOfGas`) and must be rebuilt |
 
-Per transfer on this machine: build ~1 s, prove ~6 s, balance <1 s. The ceiling for independent pairs
+One-to-many is therefore inherently sequential: a sender can move value once per block, and must
+rebuild each following transfer against the new balance. Per transfer on this machine: build ~1 s,
+prove ~6 s, balance <1 s. The ceiling for independent pairs
 was not reached at 10; raise `--senders` to look for it (each extra sender adds about four setup
 transactions, roughly 100 s).
 
@@ -222,7 +230,7 @@ build with `VITE_BASE=/that-path/`.
 | `pnpm typecheck`      | Type-check every workspace                                       |
 | `pnpm devnet:up/down` | Start / stop the local devnet                                    |
 | `pnpm deploy:contract`, `pnpm e2e` | Headless deploy / end-to-end check (`-- --network <name>`)   |
-| `pnpm bench`          | Per-block concurrency benchmark (`-- --mode disjoint\|fanin --senders N`) |
+| `pnpm bench`          | Per-block concurrency benchmark (`-- --mode disjoint\|fanin\|fanout --senders N`) |
 
 ## Troubleshooting
 

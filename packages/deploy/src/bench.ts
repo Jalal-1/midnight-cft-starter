@@ -1,26 +1,32 @@
 // Per-block concurrency benchmark for the CFT.
 //
-// Question: how many balance updates from different users can land in ONE
-// block? Method: deploy a fresh token, give every sender its own funded fee
-// wallet (like real users), build, prove and balance N transfers against the
-// same chain state, submit them all in the same instant, then read back from
-// the indexer which block included each one and whether it succeeded.
+// Question: how many balance updates can land in ONE block? Method: deploy a
+// fresh token, give every sending user its own funded fee wallet, build, prove
+// and balance N transfers against the same chain state, submit them all in the
+// same instant, then read back from the indexer which block included each one
+// and whether it succeeded.
 //
 //   pnpm bench -- --mode disjoint --senders 10    N users → N other users, independently
 //   pnpm bench -- --mode fanin    --senders 4     N users → the SAME recipient
+//   pnpm bench -- --mode fanout   --senders 4     ONE user → N recipients (N transfers at once)
 //
 // Three things bound the answer, and the benchmark separates them:
-//   1. Fees. Every transaction spends DUST, and a wallet's DUST is one coin that
-//      is spent and re-created per transaction, so ONE wallet can only pay for
-//      ONE transaction per block. Independent users have independent wallets,
-//      so each sender gets its own funded wallet here.
-//   2. Gas. A transaction carries the gas its transcript needed against the
-//      state it was built on. When another transaction in the same block has
-//      grown the same ledger map first, replaying costs more and the node
-//      rejects it at pre-dispatch with Transcript(Execution(OutOfGas)).
+//   1. Fees (DUST). Every transaction pays its fee in DUST, and a wallet's DUST
+//      is held as one coin per registered NIGHT UTXO. A coin is spent and
+//      re-created per transaction, so a wallet with one coin pays for one
+//      transaction per block. Independent users have independent wallets; the
+//      fan-out sender is funded with N NIGHT UTXOs so it holds N DUST coins.
+//   2. Execution-cost budget. A transaction declares the cost of replaying its
+//      transcript, measured against the state it was built on (the DUST fee
+//      covers that budget). When another transaction in the same block has
+//      grown the same ledger map first, replaying costs more than declared and
+//      the node rejects it at pre-dispatch; the node's internal name for this
+//      is Transcript(Execution(OutOfGas)).
 //   3. Contract state. Two credits to the SAME recipient in one block conflict
 //      (see the "Concurrency" note in OpenZeppelin's ConfidentialFungibleToken
-//      module); transfers between DISJOINT pairs touch different cells.
+//      module), and two debits from the SAME sender both pin the sender's
+//      balance ciphertext, so only the first can succeed. Transfers between
+//      DISJOINT pairs touch different cells and commute.
 //
 // Operational note: the local indexer (4.3.5) crash-loops when a dozen wallets
 // sync concurrently, so at most two wallets are live at any time: the funder
@@ -57,7 +63,7 @@ import {
 } from './wallet.js';
 
 const DECIMALS = 2;
-type Mode = 'disjoint' | 'fanin';
+type Mode = 'disjoint' | 'fanin' | 'fanout';
 
 /** A CFT account plus (for senders) the seed of its own fee wallet. */
 interface Account {
@@ -132,7 +138,8 @@ const main = async () => {
   const seed = process.env.SEED ?? (networkName === 'standalone' ? GENESIS_SEED : undefined);
   if (!seed) throw new Error('SEED env var (hex) is required for public networks');
   const mode = arg('mode', 'disjoint') as Mode;
-  if (!['disjoint', 'fanin'].includes(mode)) throw new Error(`unknown --mode ${mode}`);
+  if (!['disjoint', 'fanin', 'fanout'].includes(mode)) throw new Error(`unknown --mode ${mode}`);
+  /** Number of concurrent transfers (= senders, except fan-out: one sender, N recipients). */
   const N = Number(arg('senders', '4'));
   const amount = parseAmount(arg('amount', '1.00')!, DECIMALS);
   // NIGHT given to each sender's fee wallet (raw units, 6 decimals). DUST accrues
@@ -152,7 +159,7 @@ const main = async () => {
   const funderNight = await nightBalance(funder.wallet);
   log(`funder NIGHT: ${formatAmount(funderNight, 6)}`);
   if (funderNight < nightEach * BigInt(N) * 2n) {
-    throw new Error(`funder holds ${formatAmount(funderNight, 6)} NIGHT; need ${formatAmount(nightEach * BigInt(N) * 2n, 6)} for ${N} wallets (lower --night-each or reset the devnet)`);
+    throw new Error(`funder holds ${formatAmount(funderNight, 6)} NIGHT; need ${formatAmount(nightEach * BigInt(N) * 2n, 6)} (lower --night-each or reset the devnet)`);
   }
 
   /** Providers for `account`, paying fees from `feeWallet`, private state scoped to the account itself. */
@@ -192,24 +199,34 @@ const main = async () => {
   const issuer = new CftClient(issuerProviders, deployed, issuerAccount.identity);
 
   // ── Accounts and fee wallets ─────────────────────────────────────────────
-  const senders = Array.from({ length: N }, (_, i) => newAccount(`sender-${i}`, true));
-  const recipients = mode === 'fanin' ? [newAccount('recipient-0', false)] : Array.from({ length: N }, (_, i) => newAccount(`recipient-${i}`, false));
+  const senderCount = mode === 'fanout' ? 1 : N;
+  const recipientCount = mode === 'fanin' ? 1 : N;
+  const senders = Array.from({ length: senderCount }, (_, i) => newAccount(`sender-${i}`, true));
+  const recipients = Array.from({ length: recipientCount }, (_, i) => newAccount(`recipient-${i}`, false));
+  /** Transfer j: which sender pays and which recipient is credited. */
+  const pairs = Array.from({ length: N }, (_, j) => ({
+    sender: senders[mode === 'fanout' ? 0 : j]!,
+    recipient: recipients[mode === 'fanin' ? 0 : j]!,
+  }));
+  // Fan-out: the single sender needs N DUST coins, i.e. N registered NIGHT UTXOs.
+  const utxosPerSender = mode === 'fanout' ? N : 1;
 
-  heading(`Fund ${N} sender wallets (${formatAmount(nightEach, 6)} NIGHT each)`);
-  // Learn the addresses (wallet start is cheap), then one funding transaction.
+  heading(`Fund ${senders.length} sender wallet(s) (${utxosPerSender} × ${formatAmount(nightEach, 6)} NIGHT each)`);
   for (const s of senders) {
     const w = await startWallet(config, s.seed!);
     s.address = w.address;
     await stopWallet(w);
   }
-  await withStatus('Sending NIGHT', () => sendNight(funder, senders.map((s) => ({ address: s.address!, amount: nightEach }))));
+  await withStatus('Sending NIGHT', () =>
+    sendNight(funder, senders.flatMap((s) => Array.from({ length: utxosPerSender }, () => ({ address: s.address!, amount: nightEach })))),
+  );
   const reserve = deployFee * 2n;
   for (const s of senders) {
-    await withStatus(`${s.name}: receive NIGHT, register for DUST, reach ${reserve} specks`, () =>
+    await withStatus(`${s.name}: receive NIGHT, register ${utxosPerSender} UTXO(s) for DUST, reach ${reserve} specks`, () =>
       withOwnWallet(s, async (w) => {
         await waitForNight(w.wallet);
         await ensureDust(w);
-        await waitForDustAtLeast(w.wallet, reserve);
+        await waitForDustAtLeast(w.wallet, reserve * BigInt(utxosPerSender));
       }),
     );
   }
@@ -225,56 +242,71 @@ const main = async () => {
     setupTxs++;
     return r;
   };
-  for (let i = 0; i < N; i++) {
-    const s = senders[i]!;
+  const mintPerSender = amount * BigInt(mode === 'fanout' ? N * 2 : 10);
+  for (const s of senders) {
     await withOwnWallet(s, async (w) => {
-      // Recipients have no wallet of their own; sender i's wallet pays for recipient i.
-      if (mode === 'disjoint' || i === 0) {
-        const r = recipients[mode === 'fanin' ? 0 : i]!;
+      // Recipients have no wallet of their own; this sender's wallet pays for its recipients.
+      const mine = pairs.filter((p) => p.sender === s).map((p) => p.recipient);
+      for (const r of [...new Set(mine)]) {
         const { client } = await attach(r, w, address);
-        await timed(`register ${r.name}`, () => client.register());
+        const view = await client.view();
+        if (!view.registered) await timed(`register ${r.name}`, () => client.register());
       }
       const { client } = await attach(s, w, address);
       await timed(`register ${s.name}`, () => client.register());
-      await timed(`mint ${formatAmount(amount * 10n, DECIMALS)} → ${s.name}`, () => issuer.mint(s.accountId, amount * 10n));
+      await timed(`mint ${formatAmount(mintPerSender, DECIMALS)} → ${s.name}`, () => issuer.mint(s.accountId, mintPerSender));
       await timed(`sweep ${s.name}`, () => client.sweep());
     });
   }
   log(`setup: ${setupTxs} transactions in ${((Date.now() - setupStarted) / 1000).toFixed(0)}s`);
 
-  // ── Build + prove + balance one transfer per sender (same chain state) ───
+  // ── Build + prove + balance N transfers against the same chain state ─────
   heading('Build, prove and balance (one sender wallet live at a time)');
   const stateHeight = await blockHeight(config);
-  type Ready = { account: Account; label: string; nextPrivateState: CftPrivateState; finalized: FinalizedTransaction; buildMs: number; proveMs: number };
+  type Ready = {
+    account: Account;
+    label: string;
+    nextPrivateState: CftPrivateState;
+    finalized?: FinalizedTransaction;
+    balanceError?: string;
+  };
   const ready: Ready[] = [];
-  for (let i = 0; i < N; i++) {
-    const s = senders[i]!;
-    const r = recipients[mode === 'fanin' ? 0 : i]!;
+  for (const s of senders) {
+    const mine = pairs.filter((p) => p.sender === s);
     await withOwnWallet(s, async (w) => {
       const { providers, client } = await attach(s, w, address);
-      const t0 = Date.now();
       const b = await client.balances();
       if (b.spendable === undefined || b.spendable < amount) throw new Error(`${s.name}: spendable ${b.spendable} < ${amount}`);
-      let st = await client.state();
-      st = CftPrivateState.withSpendableCandidate(st, b.spendable - amount);
-      st = CftPrivateState.withFreshSeed(st);
-      await client.setState(st);
-      const unproven = await createUnprovenCallTx(providers, {
-        compiledContract,
-        circuitId: 'transfer',
-        contractAddress: address as ContractAddress,
-        privateStateId: PRIVATE_STATE_ID,
-        args: [fromHex(r.accountId), amount],
-      });
-      const t1 = Date.now();
-      const unbound = await providers.proofProvider.proveTx(unproven.private.unprovenTx);
-      const t2 = Date.now();
-      const finalized = await providers.walletProvider.balanceTx(unbound);
-      ready.push({ account: s, label: `${s.name} → ${r.name}`, nextPrivateState: unproven.private.nextPrivateState, finalized, buildMs: t1 - t0, proveMs: t2 - t1 });
-      log(`${s.name}: built ${((t1 - t0) / 1000).toFixed(1)}s, proved ${((t2 - t1) / 1000).toFixed(1)}s, balanced ${((Date.now() - t2) / 1000).toFixed(1)}s`);
+      for (const { recipient } of mine) {
+        const label = `${s.name} → ${recipient.name}`;
+        const t0 = Date.now();
+        // Every transfer is built from the same spendable balance (same chain state), each with a fresh seed.
+        let st = await client.state();
+        st = CftPrivateState.withSpendableCandidate(st, b.spendable - amount);
+        st = CftPrivateState.withFreshSeed(st);
+        await client.setState(st);
+        const unproven = await createUnprovenCallTx(providers, {
+          compiledContract,
+          circuitId: 'transfer',
+          contractAddress: address as ContractAddress,
+          privateStateId: PRIVATE_STATE_ID,
+          args: [fromHex(recipient.accountId), amount],
+        });
+        const t1 = Date.now();
+        const unbound = await providers.proofProvider.proveTx(unproven.private.unprovenTx);
+        const t2 = Date.now();
+        try {
+          const finalized = await providers.walletProvider.balanceTx(unbound);
+          ready.push({ account: s, label, nextPrivateState: unproven.private.nextPrivateState, finalized });
+          log(`${label}: built ${((t1 - t0) / 1000).toFixed(1)}s, proved ${((t2 - t1) / 1000).toFixed(1)}s, balanced ${((Date.now() - t2) / 1000).toFixed(1)}s`);
+        } catch (e) {
+          ready.push({ account: s, label, nextPrivateState: unproven.private.nextPrivateState, balanceError: rootCause(e) });
+          warn(`${label}: built and proved, but the wallet could not pay for it: ${rootCause(e)}`);
+        }
+      }
     });
   }
-  log(`${ready.length} transfers ready, all built against the state at block ${stateHeight}`);
+  log(`${ready.filter((r) => r.finalized).length}/${ready.length} transfers ready, all built against the state at block ${stateHeight}`);
 
   // ── Submit everything at once (relayed through the funder), then observe ─
   heading('Submit all at once');
@@ -282,6 +314,7 @@ const main = async () => {
   const submitStarted = Date.now();
   const submitted = await Promise.all(
     ready.map(async (f) => {
+      if (!f.finalized) return { ...f, txId: undefined as string | undefined, submitError: `not submitted: ${f.balanceError}` };
       try {
         const txId = await issuerProviders.midnightProvider.submitTx(f.finalized);
         return { ...f, txId, submitError: undefined as string | undefined };
@@ -291,7 +324,7 @@ const main = async () => {
     }),
   );
   log(`submitted ${submitted.filter((s) => s.txId).length}/${submitted.length} at block ${submitHeight} (built at ${stateHeight}) within ${Date.now() - submitStarted}ms`);
-  for (const s of submitted.filter((s) => s.submitError)) warn(`${s.label}: rejected at submit: ${s.submitError}`);
+  for (const s of submitted.filter((s) => s.submitError && s.finalized)) warn(`${s.label}: rejected at submit: ${s.submitError}`);
 
   const outcomes = await Promise.all(
     submitted.map(async (s) => {
@@ -304,7 +337,7 @@ const main = async () => {
       }
     }),
   );
-  if (submitted.some((s) => s.submitError)) {
+  if (submitted.some((s) => s.submitError && s.finalized)) {
     const reasons = await nodeRejectionReasons(networkName, submitStarted);
     if (reasons) log(`node pre-dispatch rejections since submit: ${reasons}`);
   }
@@ -334,12 +367,13 @@ const main = async () => {
     for (const l of e.labels) log(`   ${l}`);
   }
   const succeeded = outcomes.filter((o) => o.data?.status === 'SucceedEntirely').length;
-  const rejectedAtSubmit = outcomes.filter((o) => !o.txId).length;
+  const notPaid = outcomes.filter((o) => !o.finalized).length;
+  const rejectedAtSubmit = outcomes.filter((o) => o.finalized && !o.txId).length;
   const includedButFailed = outcomes.filter((o) => o.data && o.data.status !== 'SucceedEntirely').length;
   const blocksUsed = [...byBlock.keys()].filter((h) => h !== -1);
   const maxPerBlock = Math.max(0, ...[...byBlock.entries()].filter(([h]) => h !== -1).map(([, e]) => e.ok));
   ok(
-    `${succeeded}/${outcomes.length} succeeded (${rejectedAtSubmit} rejected by the node before inclusion, ${includedButFailed} included but failed); ` +
+    `${succeeded}/${outcomes.length} succeeded (${notPaid} the wallet could not pay for, ${rejectedAtSubmit} rejected by the node before inclusion, ${includedButFailed} included but failed); ` +
       `successes spread over ${blocksUsed.length} block(s); max successful per block: ${maxPerBlock}`,
   );
 
