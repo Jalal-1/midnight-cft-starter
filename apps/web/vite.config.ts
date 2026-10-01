@@ -11,6 +11,8 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const managed = path.resolve(here, '..', '..', 'packages', 'contract', 'src', 'managed', 'cft');
 
 export default defineConfig({
+  // Set VITE_BASE=/<repo>/ when hosting under a sub-path (GitHub project pages).
+  base: process.env.VITE_BASE ?? '/',
   plugins: [
     react(),
     tailwindcss(),

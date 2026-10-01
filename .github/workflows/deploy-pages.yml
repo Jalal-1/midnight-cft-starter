@@ -1,0 +1,83 @@
+# Build the contract and the web app, then publish apps/web/dist to GitHub Pages.
+#
+# Triggered on every push to main (and manually). The Compact toolchain is
+# installed at the version pinned in .compact-version; the compiled contract
+# (incl. ~48 MB of proving keys) is cached between runs keyed on the contract
+# source, so most runs skip the compile.
+#
+# One-time setup: Settings → Pages → Source: "GitHub Actions".
+name: Deploy web to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Restore compiled contract
+        id: contract-cache
+        uses: actions/cache@v4
+        with:
+          path: packages/contract/src/managed
+          key: compact-${{ hashFiles('.compact-version', 'packages/contract/src/cft.compact', 'pnpm-lock.yaml') }}
+
+      - name: Install Compact toolchain
+        if: steps.contract-cache.outputs.cache-hit != 'true'
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/midnightntwrk/compact/releases/latest/download/compact-installer.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/compact" update "$(cat .compact-version)"
+          "$HOME/.local/bin/compact" compile --version
+
+      - name: Compile contract
+        if: steps.contract-cache.outputs.cache-hit != 'true'
+        run: pnpm compile
+
+      - name: Build contract SDK
+        run: pnpm build:contract
+
+      - name: Build web app
+        env:
+          # Project sites live under /<repo>/; a <user>.github.io site lives at /.
+          VITE_BASE: ${{ endsWith(github.event.repository.name, '.github.io') && '/' || format('/{0}/', github.event.repository.name) }}
+        run: pnpm --filter web build
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: apps/web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

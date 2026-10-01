@@ -74,8 +74,9 @@ export interface MakeProvidersOptions {
 
 export const makeProviders = async ({ api, keys, walletAddress, network, proofServer }: MakeProvidersOptions): Promise<CftProviders> => {
   setNetworkId(network.id);
+  // Absolute URL of the served ZK assets, honouring the app's base path.
   const zkConfigProvider = new FetchZkConfigProvider<CftCircuitId>(
-    `${window.location.origin}/${ZK_ASSETS_PATH}`,
+    new URL(`${import.meta.env.BASE_URL}${ZK_ASSETS_PATH}`, window.location.origin).toString(),
     fetch.bind(window),
   );
   const proofProvider = canProveInWallet(api)

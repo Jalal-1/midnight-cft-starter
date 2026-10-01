@@ -147,6 +147,17 @@ secret) and reused on the next deploy; addresses are appended to `deployments.tx
    `findDeployedContract`; `CftClient` rotates the randomness seed before every transaction and keeps
    the plaintext cache the OZ witnesses require.
 
+## Hosting
+
+The web app is a static site: proving happens inside 1AM and chain state is read from the public
+indexer, so no server is needed. `.github/workflows/deploy-pages.yml` builds everything (installing the
+pinned Compact toolchain and caching the compiled contract) and publishes `apps/web/dist` to **GitHub
+Pages** on every push to `main`. Turn it on once under Settings → Pages → Source: *GitHub Actions*.
+
+Any other static host works the same way: run `pnpm compile && pnpm build` and upload `apps/web/dist`
+(about 60 MB, mostly proving keys; the largest file is 22 MB). When the site is served under a sub-path,
+build with `VITE_BASE=/that-path/`.
+
 ## Scripts
 
 | Command               | What it does                                                     |
